@@ -2,7 +2,7 @@ name: "ackt author attestation"
 description: >-
   Posts the ackt attest link on a pull request and asks the ackt service
   whether the PR author has attested to the current head SHA, posting the
-  result as the ackt/author-attestation status check. No App, no webhooks —
+  result as the ackt / human-review status check. No App, no webhooks —
   see docs/superpowers/specs/2026-08-08-no-app-design.md.
 author: "aboldnewlook"
 
@@ -20,7 +20,7 @@ inputs:
     description: >-
       When "true", the job fails if the PR author has not attested the
       current head. When "false" (the default), the job always succeeds and
-      only the ackt/author-attestation status reflects attestation state, so
+      only the ackt / human-review status reflects attestation state, so
       adopting this action never breaks CI for repos still evaluating ackt.
       policy-bot (or any other consumer) should read the status check, not
       this job's outcome.

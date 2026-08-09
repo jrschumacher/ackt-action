@@ -2,7 +2,7 @@
 
 Posts the ackt attest link on a pull request and asks the ackt service
 whether the PR author has attested the current head SHA, then posts the
-result as the `ackt/author-attestation` status check. No GitHub App, no
+result as the `ackt / human-review` status check. No GitHub App, no
 webhooks, no secrets beyond the default workflow token — see
 [`docs/superpowers/specs/2026-08-08-no-app-design.md`](../docs/superpowers/specs/2026-08-08-no-app-design.md)
 for why.
@@ -43,7 +43,7 @@ Both triggers are required — see "Triggers" below for why.
 | Input | Default | Description |
 |---|---|---|
 | `service` | `https://ackt.dev` | Base URL of the ackt service to query and link to. This repo's own [`.github/workflows/ackt.yml`](../.github/workflows/ackt.yml) overrides this to the live preview deployment (`https://ackt-preview.j-r-schumacher.workers.dev`) because `ackt.dev` isn't live yet — see the comment there. |
-| `fail-on-unattested` | `false` | When `true`, the job fails if the PR author hasn't attested the current head. Leave this `false` unless you specifically want the job's own pass/fail (rather than the status check) to gate something — most consumers, including policy-bot, should read the `ackt/author-attestation` status check instead, not this job's outcome. |
+| `fail-on-unattested` | `false` | When `true`, the job fails if the PR author hasn't attested the current head. Leave this `false` unless you specifically want the job's own pass/fail (rather than the status check) to gate something — most consumers, including policy-bot, should read the `ackt / human-review` status check instead, not this job's outcome. |
 | `github-token` | `${{ github.token }}` | Token used to read the PR, post the comment, post the status, and add reactions. The default workflow token is sufficient. |
 
 ## Outputs
@@ -55,7 +55,7 @@ Both triggers are required — see "Triggers" below for why.
 
 ## What each trigger does
 
-**`pull_request`** (`opened`, `reopened`, `synchronize`): resolve the PR's real author and head SHA from the GitHub API (never the event payload, which is stale on `synchronize`), query the ackt service, post or update the tracking comment, and post the `ackt/author-attestation` status.
+**`pull_request`** (`opened`, `reopened`, `synchronize`): resolve the PR's real author and head SHA from the GitHub API (never the event payload, which is stale on `synchronize`), query the ackt service, post or update the tracking comment, and post the `ackt / human-review` status.
 
 **`issue_comment`** (`created`, `edited`): this event fires for every comment on every issue *and* pull request in the repo, so most of them are not ackt's concern. A run only proceeds when:
 

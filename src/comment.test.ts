@@ -5,9 +5,11 @@ import {
   BOT_LOGIN,
   escapeMarkdown,
   findAcktComment,
+  formatUtc,
   isCheckboxChecked,
   renderComment,
   resetCheckbox,
+  type AttestationRecord,
   type CommentInput,
   type GithubComment,
 } from "./comment.js";
@@ -25,14 +27,15 @@ const BASE_INPUT: CommentInput = {
 };
 
 describe("renderComment", () => {
-  it("always contains the marker", () => {
+  it("always contains the marker, in every state", () => {
     expect(renderComment(BASE_INPUT)).toContain(ACKT_COMMENT_MARKER);
-    expect(renderComment({ ...BASE_INPUT, attested: true, statementSha256: "9f86d081884c7d65" })).toContain(ACKT_COMMENT_MARKER);
-  });
-
-  it("contains the attest link with owner/repo/pr/head", () => {
-    const body = renderComment(BASE_INPUT);
-    expect(body).toContain("https://ackt.dev/a/opentdf/platform/3794/4968d60a36f23ca29993221a36828213fe43b304");
+    expect(renderComment({ ...BASE_INPUT, attested: true, recordedAt: "2026-08-09 12:23" })).toContain(ACKT_COMMENT_MARKER);
+    expect(
+      renderComment({
+        ...BASE_INPUT,
+        priorAttestations: [{ actor: "jrschumacher", headSha: "e0b3f72c1a4d9f0b5e6a7c8d9e0f1a2b3c4d5e6f", recordedAt: "2026-08-09 12:23" }],
+      }),
+    ).toContain(ACKT_COMMENT_MARKER);
   });
 
   it("updates the link's head segment when the head changes — the whole point of carrying it here", () => {
@@ -42,23 +45,99 @@ describe("renderComment", () => {
     expect(body).not.toContain(BASE_INPUT.headSha);
   });
 
-  it("renders the unchecked re-check checkbox", () => {
-    expect(renderComment(BASE_INPUT)).toContain("- [ ] Re-check attestation");
+  it("is stable — identical input produces identical output", () => {
+    expect(renderComment(BASE_INPUT)).toBe(renderComment(BASE_INPUT));
+  });
+});
+
+describe("renderComment — awaiting", () => {
+  it("renders the awaiting heading and names the current commit", () => {
+    const body = renderComment(BASE_INPUT);
+    expect(body).toContain("Human review attestation — awaiting");
+    expect(body).toContain("`4968d60`");
   });
 
-  it("notes that /ackt also works", () => {
+  it("renders a prominent attest link/CTA for the current head", () => {
+    const body = renderComment(BASE_INPUT);
+    expect(body).toContain(`[Attest to this diff](https://ackt.dev/a/opentdf/platform/3794/${BASE_INPUT.headSha})`);
+  });
+
+  it("notes that commenting /ackt re-runs the check", () => {
     expect(renderComment(BASE_INPUT)).toMatch(/\/ackt/);
   });
 
-  it("renders attested vs not-attested status distinctly", () => {
-    const notAttested = renderComment(BASE_INPUT);
-    const attested = renderComment({ ...BASE_INPUT, attested: true });
-    expect(notAttested).toContain("Not yet attested");
-    expect(attested).toContain("Attested by @jrschumacher");
+  it("keeps the re-check checkbox, unchecked, next to the CTA", () => {
+    expect(renderComment(BASE_INPUT)).toContain("- [ ] Re-check attestation");
+  });
+});
+
+describe("renderComment — attested", () => {
+  const input: CommentInput = { ...BASE_INPUT, attested: true, recordedAt: "2026-08-09 12:23" };
+
+  it("renders the attested heading", () => {
+    expect(renderComment(input)).toContain("Human review attestation — ✔ attested");
   });
 
-  it("is stable — identical input produces identical output", () => {
-    expect(renderComment(BASE_INPUT)).toBe(renderComment(BASE_INPUT));
+  it("renders a table with Author / Commit / Recorded (UTC) columns", () => {
+    const body = renderComment(input);
+    expect(body).toContain("| Author | Commit | Recorded (UTC) |");
+    expect(body).toContain("[@jrschumacher](https://github.com/jrschumacher)");
+    expect(body).toContain("`4968d60`");
+    expect(body).toContain("2026-08-09 12:23");
+  });
+
+  it("states the attestation covers exactly this commit and that new commits reset it", () => {
+    expect(renderComment(input)).toMatch(/Covers exactly `4968d60`\. New commits reset the check\./);
+  });
+
+  it("does not render the re-check checkbox — there is nothing to re-check yet", () => {
+    expect(renderComment(input)).not.toContain("- [ ] Re-check attestation");
+  });
+});
+
+describe("renderComment — stale", () => {
+  const prior: readonly AttestationRecord[] = [
+    { actor: "jrschumacher", headSha: "e0b3f72c1a4d9f0b5e6a7c8d9e0f1a2b3c4d5e6f", recordedAt: "2026-08-09 12:23" },
+  ];
+  const input: CommentInput = {
+    ...BASE_INPUT,
+    headSha: "91acd0400000000000000000000000000000000",
+    attested: false,
+    priorAttestations: prior,
+  };
+
+  it("renders the stale heading and names the new/current commit", () => {
+    const body = renderComment(input);
+    expect(body).toContain("Human review attestation — ⚠ stale");
+    expect(body).toContain("`91acd04`");
+  });
+
+  it("offers a way to attest the new diff", () => {
+    const body = renderComment(input);
+    expect(body).toContain(`[Attest to the new diff](https://ackt.dev/a/opentdf/platform/3794/${input.headSha})`);
+  });
+
+  it("keeps the re-check checkbox, unchecked, next to the re-attest prompt", () => {
+    expect(renderComment(input)).toContain("- [ ] Re-check attestation");
+  });
+
+  it("puts the prior attestation(s) inside a collapsed <details>, each marked superseded", () => {
+    const body = renderComment(input);
+    expect(body).toContain("<details>");
+    expect(body).toContain("</details>");
+    expect(body).toContain("<summary>Attestation history (1)</summary>");
+
+    const start = body.indexOf("<details>");
+    const end = body.indexOf("</details>");
+    const detailsBlock = body.slice(start, end);
+    expect(detailsBlock).toContain("e0b3f72");
+    expect(detailsBlock).toContain("(superseded)");
+    expect(detailsBlock).toContain("[@jrschumacher](https://github.com/jrschumacher)");
+  });
+
+  it("falls back to the awaiting render when priorAttestations is empty", () => {
+    const body = renderComment({ ...BASE_INPUT, attested: false, priorAttestations: [] });
+    expect(body).toContain("Human review attestation — awaiting");
   });
 });
 
@@ -72,39 +151,61 @@ describe("escapeMarkdown", () => {
   });
 
   it("escapes angle brackets so HTML cannot be injected", () => {
-    expect(escapeMarkdown("<img src=x onerror=alert(1)>")).toBe("&lt;img src=x onerror=alert(1)&gt;");
+    expect(escapeMarkdown("<img src=x onerror=alert(1)>")).toBe("&lt;img src=x onerror=alert\\(1\\)&gt;");
   });
 
   it("escapes ampersands first so introduced entities are not re-escaped", () => {
     expect(escapeMarkdown("a & b < c")).toBe("a &amp; b &lt; c");
   });
+
+  it("escapes brackets and parens so markdown link syntax cannot be forged", () => {
+    expect(escapeMarkdown("[click](javascript:alert(1))")).toBe("\\[click\\]\\(javascript:alert\\(1\\)\\)");
+  });
 });
 
-/** Real table delimiters only — a `\|` produced by escapeMarkdown is a literal escaped pipe, not a cell boundary, so it's stripped before counting. */
-function countUnescapedPipes(line: string): number {
-  return line.replace(/\\\|/g, "").split("|").length - 1;
-}
-
 describe("renderComment escaping of attacker-controlled fields", () => {
-  it("a malicious branch name does not break the table or inject markup", () => {
+  it("a malicious branch name is neutralized in the context line", () => {
     const body = renderComment({ ...BASE_INPUT, headRef: "evil|`<script>alert(1)</script>`" });
-    // The table row must still have exactly 3 real (unescaped) pipe
-    // delimiters — the malicious value's own `|` must have been escaped,
-    // not left free to open an extra cell.
-    const row = body.split("\n").find((line) => line.startsWith("| Pull request"));
-    expect(row).toBeDefined();
-    expect(countUnescapedPipes(row ?? "")).toBe(3);
     expect(body).not.toContain("<script>");
     expect(body).not.toContain("`<script>");
+    expect(body).toContain("evil\\|&#96;&lt;script&gt;alert\\(1\\)&lt;/script&gt;&#96;");
   });
 
-  it("a malicious PR title does not break the table or inject markup", () => {
+  it("a malicious PR title is neutralized in the context line", () => {
     const body = renderComment({ ...BASE_INPUT, title: "Fix | bug `here` <b>now</b>" });
     expect(body).not.toContain("<b>");
     expect(body).not.toContain("</b>");
-    const row = body.split("\n").find((line) => line.startsWith("| Pull request"));
-    expect(row).toBeDefined();
-    expect(countUnescapedPipes(row ?? "")).toBe(3);
+    expect(body).toContain("Fix \\| bug &#96;here&#96; &lt;b&gt;now&lt;/b&gt;");
+  });
+
+  it("a malicious actor login is neutralized in the attested table row and profile link", () => {
+    const body = renderComment({
+      ...BASE_INPUT,
+      attested: true,
+      recordedAt: "2026-08-09 12:23",
+      actor: "evil](javascript:alert(1))<img src=x>",
+    });
+    expect(body).not.toContain("<img");
+    expect(body).not.toContain("](javascript:alert(1))<img");
+  });
+
+  it("a malicious prior-attestation actor login is neutralized in the stale history table", () => {
+    const body = renderComment({
+      ...BASE_INPUT,
+      attested: false,
+      priorAttestations: [{ actor: "evil<script>", headSha: "a".repeat(40), recordedAt: "2026-08-09 12:23" }],
+    });
+    expect(body).not.toContain("<script>");
+  });
+});
+
+describe("formatUtc", () => {
+  it("formats a Date as 'YYYY-MM-DD HH:mm' in UTC", () => {
+    expect(formatUtc(new Date(Date.UTC(2026, 7, 9, 12, 23, 45)))).toBe("2026-08-09 12:23");
+  });
+
+  it("zero-pads single-digit month, day, hour, and minute", () => {
+    expect(formatUtc(new Date(Date.UTC(2026, 0, 5, 3, 7, 0)))).toBe("2026-01-05 03:07");
   });
 });
 

@@ -10,7 +10,7 @@
 
 import { appendFileSync, readFileSync } from "node:fs";
 
-import { attestUrl, findAcktComment, renderComment, resetCheckbox } from "./comment.js";
+import { attestUrl, findAcktComment, formatUtc, renderComment, resetCheckbox } from "./comment.js";
 import { GithubClient } from "./github.js";
 import { queryAckt, type FetchLike } from "./query.js";
 import { decideTrigger } from "./trigger.js";
@@ -78,7 +78,7 @@ async function run(): Promise<void> {
   const link = attestUrl(service, owner, repo, prNumber, head);
   await client.createStatus(owner, repo, head, {
     state: result.attested ? "success" : "pending",
-    context: "ackt/author-attestation",
+    context: "ackt / human-review",
     description: result.attested
       ? `Attested by @${actor} at ${head.slice(0, 7)}`
       : `@${actor}, attest this PR — see the comment below`,
@@ -98,6 +98,10 @@ async function run(): Promise<void> {
       headRef: pr.head.ref,
       title: pr.title,
       attested: result.attested,
+      // The query API reports whether the current head is attested, not
+      // when — this run's own clock is the best available answer to "when
+      // was this recorded" until the service returns a real timestamp.
+      ...(result.attested ? { recordedAt: formatUtc(new Date()) } : {}),
       ...(result.statementSha256 !== null ? { statementSha256: result.statementSha256 } : {}),
     }),
   );
