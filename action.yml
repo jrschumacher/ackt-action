@@ -1,0 +1,45 @@
+name: "ackt author attestation"
+description: >-
+  Posts the ackt attest link on a pull request and asks the ackt service
+  whether the PR author has attested to the current head SHA, posting the
+  result as the ackt/author-attestation status check. No App, no webhooks —
+  see docs/superpowers/specs/2026-08-08-no-app-design.md.
+author: "aboldnewlook"
+
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  service:
+    description: >-
+      Base URL of the ackt service to query and link to.
+    required: false
+    default: "https://ackt.dev"
+  fail-on-unattested:
+    description: >-
+      When "true", the job fails if the PR author has not attested the
+      current head. When "false" (the default), the job always succeeds and
+      only the ackt/author-attestation status reflects attestation state, so
+      adopting this action never breaks CI for repos still evaluating ackt.
+      policy-bot (or any other consumer) should read the status check, not
+      this job's outcome.
+    required: false
+    default: "false"
+  github-token:
+    description: >-
+      Token used to read the pull request, post the comment, post the
+      status check, and add reactions. The default workflow token is
+      sufficient.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  attested:
+    description: '"true" or "false" — whether the PR author has attested the current head. Only set when the event was a trigger; see the "acted" output.'
+  acted:
+    description: '"true" or "false" — whether this run was a recognized trigger at all (see trigger.ts). Most issue_comment events are not.'
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
