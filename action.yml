@@ -7,7 +7,9 @@ description: >-
   REQUIRES "permissions: id-token: write" in the calling workflow — the
   action authenticates to the ackt service with a GitHub Actions OIDC
   token and fails the step without one. Also use
-  "actions/checkout@v4 with: fetch-depth: 0" so it can check ancestry.
+  "actions/checkout@v4 with: fetch-depth: 0" and an explicit "ref:" set to
+  the pull request's real head SHA (the default checkout ref is neither
+  the PR head nor useful for ancestry on either trigger) — see README.md.
 author: "aboldnewlook"
 
 branding:

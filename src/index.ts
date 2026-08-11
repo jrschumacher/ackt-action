@@ -10,10 +10,11 @@
 
 import { appendFileSync, readFileSync } from "node:fs";
 
+import { computeAncestryVerdicts } from "./ancestry.js";
 import { attestUrl, findAcktComment, formatUtc, renderComment, resetCheckbox } from "./comment.js";
 import { GithubClient } from "./github.js";
 import { mintOidcToken } from "./oidc.js";
-import { queryAckt, type FetchLike } from "./query.js";
+import { postAncestry, queryAckt, type FetchLike } from "./query.js";
 import { decideTrigger } from "./trigger.js";
 
 function getInput(name: string): string {
@@ -124,6 +125,23 @@ async function run(): Promise<void> {
   // result, so the visible reaction always matches what's already live.
   if (triggerCommentId !== undefined) {
     await client.addReaction(owner, repo, triggerCommentId, result.attested ? "+1" : "-1");
+  }
+
+  // Phase two and three of the two-phase ancestry exchange
+  // (docs/superpowers/specs/2026-08-11-dashboard-design.md): `result.attestedHeads`
+  // is phase one, already in hand from the query above. Computed and
+  // reported last, after every visible side effect (status, comment,
+  // reactions) — this is dashboard bookkeeping, not part of the attestation
+  // decision, and a failure here must never turn an otherwise-successful
+  // run red. `acktToken` is reused rather than minted again (see its own
+  // comment, above).
+  try {
+    const verdicts = computeAncestryVerdicts(result.attestedHeads, head);
+    if (verdicts.size > 0) {
+      await postAncestry({ service, repo: `${owner}/${repo}`, pr: prNumber, actor, verdicts }, fetchImpl, acktToken);
+    }
+  } catch (error) {
+    console.warn(`::warning::ackt could not report commit ancestry to the service: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   setOutput("attested", String(result.attested));

@@ -33,18 +33,45 @@ jobs:
   ackt:
     runs-on: ubuntu-latest
     steps:
+      # issue_comment's event payload carries no PR head SHA at all (only a
+      # pull_request event does — see the checkout step below) — so on that
+      # trigger it has to be resolved from the API before checkout happens.
+      - name: Resolve PR head SHA (issue_comment only)
+        id: pr-head
+        if: github.event_name == 'issue_comment'
+        run: echo "sha=$(gh pr view "${{ github.event.issue.number }}" --json headRefOid -q .headRefOid)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # required — full history, so ancestry can be checked
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || steps.pr-head.outputs.sha }} # required — see "Full history" below
       - uses: aboldnewlook/human-reviewer-attestation/action@main
 ```
 
 Both triggers are required — see "Triggers" below for why.
 
-Both `id-token: write` and `fetch-depth: 0` are required. The action fails
-the step without the first; the second it needs to answer ancestry
-questions about heads attested before the current one. Neither is a
-default, so copy the block above rather than assembling it.
+`id-token: write`, `fetch-depth: 0`, and the explicit `ref:` are all
+required. The action fails the step without the first; the other two it
+needs to answer ancestry questions about heads attested before the current
+one. None of the three is a default, so copy the block above rather than
+assembling it.
+
+### Why the checkout needs an explicit `ref:`
+
+`actions/checkout`'s *default* ref is not the pull request's head on either
+trigger this action listens for: on `pull_request` it's the ephemeral
+**merge ref** (`refs/pull/<n>/merge`, a synthetic commit GitHub builds by
+merging the PR into its base — not the PR's own head), and on
+`issue_comment` it's the **default branch**, because that event has no PR
+context in its payload at all. `git merge-base --is-ancestor` needs the
+real head SHA to compare against, not whatever the default happened to
+check out — comparing against the merge ref in particular *fails safe*
+(older commits still read as ancestors, so a moved head reads `advanced`
+rather than a false `rewritten`) but it is still the wrong answer, and
+`pull_request` is the more common of the two triggers. Resolving and
+passing `ref:` explicitly, as the block above does, is what makes the
+comparison correct rather than merely non-destructive.
 
 ## The OIDC token
 
@@ -74,6 +101,16 @@ request's real history to decide whether a head attested earlier is still
 an ancestor of the current head — a rebase or force-push removes it, and
 `git merge-base --is-ancestor` is the only thing that can tell those apart.
 `fetch-depth: 0` is what makes that answerable.
+
+Depth alone is not enough, though — see "Why the checkout needs an explicit
+`ref:`" above. Ancestry needs both the *right* history and a comparison
+against the PR's *real* head; `fetch-depth: 0` provides the first,
+`ref:` the second, and this action needs both to answer anything but
+`unknown`. Either one missing degrades ancestry results to `unknown` (never
+a wrong verdict — see `src/ancestry.ts`'s `isAncestor`) rather than
+breaking the run: `id-token: write` is the one requirement this action
+fails the step over, because a missing identity token is a security gap,
+not a precision one.
 
 ## Inputs
 
@@ -120,6 +157,38 @@ Authorization: Bearer <GitHub Actions OIDC token, audience ackt.dev>
 ```
 
 `actor` and `head` always come from `GET /repos/{owner}/{repo}/pulls/{n}`, never the webhook payload.
+
+## Ancestry: a two-phase exchange
+
+`attested_heads` above lists every head this actor has attested on this
+pull request, oldest first — every one of them *except* the current head is
+a candidate for ancestry: has the commit they signed for advanced (still in
+this history) or been rewritten out of it (rebase, force-push)? The service
+cannot answer that itself — it has no clone — so the answer comes back in
+two more steps, both local to this action (`src/ancestry.ts`):
+
+1. For each head in `attested_heads` other than the current one, run
+   `git merge-base --is-ancestor <head> <current head sha>` locally.
+   `true` → `advanced`; the specific exit code `1` (git checked and said no)
+   → `rewritten`; anything else — a missing object, a shallow clone, the
+   wrong ref checked out — → no verdict at all, never a guess.
+2. Report whatever verdicts came out of that (only when there's at least
+   one) with the same OIDC token as the query above:
+
+   ```
+   POST {service}/api/v1/ancestry
+   Authorization: Bearer <same GitHub Actions OIDC token>
+   Content-Type: application/json
+
+   { "repo": "<owner/name>", "pr": <n>, "actor": "<PR author>",
+     "verdicts": { "<head sha>": "advanced" | "rewritten", ... } }
+   ```
+
+This step is best-effort dashboard bookkeeping, not part of the attestation
+decision: it runs last, after the status check, comment, and reactions are
+already posted, and a failure here (a network hiccup, the service being
+briefly down) is logged as a workflow warning and never fails the run —
+see `index.ts`'s own comment at the call site.
 
 `attested_heads` lists every head this actor has attested on this pull
 request, oldest first. The service can say *which* heads were attested; only
