@@ -42,11 +42,12 @@ jobs:
         run: echo "sha=$(gh pr view "${{ github.event.issue.number }}" --json headRefOid -q .headRefOid)" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # required — gh resolves the repo from git remotes/GH_REPO, never GITHUB_REPOSITORY; without this it fails "not a git repository" before checkout has even run
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # required — full history, so ancestry can be checked
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || steps.pr-head.outputs.sha }} # required — see "Full history" below
-      - uses: aboldnewlook/human-reviewer-attestation/action@main
+      - uses: jrschumacher/ackt-action@v1
 ```
 
 Both triggers are required — see "Triggers" below for why.

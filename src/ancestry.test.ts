@@ -66,7 +66,9 @@ describe("isAncestor", () => {
   it("fetches the commit directly from origin before checking ancestry", () => {
     mockExecFileSync.mockReturnValue(undefined);
     isAncestor(COMMIT, HEAD);
-    expect(mockExecFileSync).toHaveBeenNthCalledWith(1, "git", ["fetch", "--quiet", "--depth=1", "origin", COMMIT], { stdio: "ignore" });
+    // No --depth here — see ancestry.ts's comment at this call site for why
+    // a shallow fetch of the commit must never come back.
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(1, "git", ["fetch", "--quiet", "origin", COMMIT], { stdio: "ignore" });
     expect(mockExecFileSync).toHaveBeenNthCalledWith(2, "git", ["merge-base", "--is-ancestor", COMMIT, HEAD], { stdio: "ignore" });
   });
 });

@@ -30,8 +30,23 @@ export function isAncestor(commit, head) {
     // --is-ancestor exits 128 ("bad object"), which the rule below correctly
     // reads as "cannot tell", and *rewritten* would essentially never fire.
     // GitHub serves retained unreachable objects by SHA, so ask for it directly.
+    //
+    // NEVER add --depth=1 (or any --depth) back to this fetch. In a full
+    // (non-shallow) clone, a shallow fetch writes .git/shallow and truncates
+    // the fetched commit's own parents from that point on -- it does not stay
+    // scoped to the one commit requested. Reviewed and reproduced directly: on
+    // a linear 6-commit history, `is-ancestor(A, H)` correctly exits 0 before
+    // any shallow fetch, then a `--depth=1` fetch of a *later* commit B alone
+    // is enough to make that same `is-ancestor(A, H)` exit 1 afterwards -- and
+    // exit 1 is the one code this function treats as trustworthy ("git checked
+    // and the answer is no"), so this doesn't degrade to unknown, it produces
+    // a confident, false *rewritten* verdict. Reachable in practice: attesting
+    // the tip and later attesting an older commit via the attest page's manual
+    // head override is enough, since `attested_heads` (verified_at ASC) then
+    // fetches the tip first. Fetching a single SHA without a depth limit is
+    // already cheap -- there is no performance case for reintroducing this.
     try {
-        execFileSync("git", ["fetch", "--quiet", "--depth=1", "origin", commit], { stdio: "ignore" });
+        execFileSync("git", ["fetch", "--quiet", "origin", commit], { stdio: "ignore" });
     }
     catch {
         return null; // the object is genuinely gone from the remote: unknown
