@@ -66,25 +66,54 @@ describe("parseAcktResponse", () => {
 });
 
 describe("queryAckt", () => {
-  function fakeFetch(response: { ok: boolean; status?: number; statusText?: string; body?: unknown }): FetchLike {
-    return async () => ({
-      ok: response.ok,
-      status: response.status ?? (response.ok ? 200 : 500),
-      statusText: response.statusText ?? "",
-      json: async () => response.body,
-    });
+  const TOKEN = "eyJhbGciOiJSUzI1NiJ9.header.signature";
+
+  interface Call {
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  function fakeFetch(response: { ok: boolean; status?: number; statusText?: string; body?: unknown }, calls: Call[] = []): FetchLike {
+    return async (url, init) => {
+      calls.push({ url, headers: init.headers });
+      return {
+        ok: response.ok,
+        status: response.status ?? (response.ok ? 200 : 500),
+        statusText: response.statusText ?? "",
+        json: async () => response.body,
+      };
+    };
   }
 
   it("returns the parsed result on success", async () => {
-    const result = await queryAckt(INPUT, fakeFetch({ ok: true, body: { attested: true, statement_sha256: "deadbeef" } }));
+    const result = await queryAckt(INPUT, fakeFetch({ ok: true, body: { attested: true, statement_sha256: "deadbeef" } }), TOKEN);
     expect(result).toEqual({ attested: true, statementSha256: "deadbeef" });
   });
 
+  it("sends the OIDC token as an Authorization: Bearer header", async () => {
+    const calls: Call[] = [];
+    await queryAckt(INPUT, fakeFetch({ ok: true, body: { attested: false } }, calls), TOKEN);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.headers.Authorization).toBe(`Bearer ${TOKEN}`);
+    expect(calls[0]?.url).toBe(buildAcktQueryUrl(INPUT));
+  });
+
+  it("never puts the token in the URL", async () => {
+    const calls: Call[] = [];
+    await queryAckt(INPUT, fakeFetch({ ok: true, body: { attested: false } }, calls), TOKEN);
+    expect(calls[0]?.url).not.toContain(TOKEN);
+  });
+
   it("throws on a non-ok HTTP response", async () => {
-    await expect(queryAckt(INPUT, fakeFetch({ ok: false, status: 503, statusText: "Service Unavailable" }))).rejects.toThrow(/503/);
+    await expect(queryAckt(INPUT, fakeFetch({ ok: false, status: 503, statusText: "Service Unavailable" }), TOKEN)).rejects.toThrow(/503/);
   });
 
   it("throws on a malformed 200 response", async () => {
-    await expect(queryAckt(INPUT, fakeFetch({ ok: true, body: { oops: true } }))).rejects.toThrow(/malformed/);
+    await expect(queryAckt(INPUT, fakeFetch({ ok: true, body: { oops: true } }), TOKEN)).rejects.toThrow(/malformed/);
+  });
+
+  it("ignores unknown response fields, so the service can add some without breaking this action", async () => {
+    const result = await queryAckt(INPUT, fakeFetch({ ok: true, body: { attested: true, statement_sha256: "abc", attested_heads: ["a".repeat(40)] } }), TOKEN);
+    expect(result).toEqual({ attested: true, statementSha256: "abc" });
   });
 });

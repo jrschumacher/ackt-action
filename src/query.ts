@@ -51,16 +51,30 @@ export function parseAcktResponse(data: unknown): AcktQueryResult {
  * fetch` / `Response`, so tests can pass a plain object literal instead of
  * constructing a real `Response`.
  */
-export type FetchLike = (url: string) => Promise<{
+export type FetchLike = (
+  url: string,
+  init: { readonly headers: Record<string, string> },
+) => Promise<{
   readonly ok: boolean;
   readonly status: number;
   readonly statusText: string;
   json(): Promise<unknown>;
 }>;
 
-export async function queryAckt(input: AcktQueryInput, fetchImpl: FetchLike): Promise<AcktQueryResult> {
+/**
+ * `token` is the GitHub Actions OIDC token from oidc.ts, sent as
+ * `Authorization: Bearer`. It's a parameter rather than something this module
+ * mints because minting is I/O and this module is otherwise pure — see
+ * oidc.ts's header comment.
+ *
+ * The service reads its signed claims to learn which repository this run
+ * really belongs to, which is what lets it answer for private repositories
+ * and record the check for the dashboard. A query without it is answered for
+ * public repositories only, and recorded nowhere.
+ */
+export async function queryAckt(input: AcktQueryInput, fetchImpl: FetchLike, token: string): Promise<AcktQueryResult> {
   const url = buildAcktQueryUrl(input);
-  const response = await fetchImpl(url);
+  const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
   if (!response.ok) {
     throw new Error(`ackt query failed: ${response.status} ${response.statusText}`);
   }

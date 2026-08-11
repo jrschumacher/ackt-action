@@ -4,11 +4,21 @@ description: >-
   whether the PR author has attested to the current head SHA, posting the
   result as the ackt / human-review status check. No App, no webhooks —
   see docs/superpowers/specs/2026-08-08-no-app-design.md.
+  REQUIRES "permissions: id-token: write" in the calling workflow — the
+  action authenticates to the ackt service with a GitHub Actions OIDC
+  token and fails the step without one. Also use
+  "actions/checkout@v4 with: fetch-depth: 0" so it can check ancestry.
 author: "aboldnewlook"
 
 branding:
   icon: "shield"
   color: "green"
+
+# There is deliberately no `permissions:` key here — Actions metadata has no
+# such field. Permissions are granted by the *consumer's* workflow file, so
+# `id-token: write` is documented (in `description` above and in README.md)
+# and enforced at runtime: src/oidc.ts fails the step, naming the permission
+# and the workflow file, when the runner exposed no OIDC endpoint.
 
 inputs:
   service:

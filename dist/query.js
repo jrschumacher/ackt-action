@@ -30,9 +30,20 @@ export function parseAcktResponse(data) {
     const statementSha256 = typeof record.statement_sha256 === "string" ? record.statement_sha256 : null;
     return { attested: record.attested, statementSha256 };
 }
-export async function queryAckt(input, fetchImpl) {
+/**
+ * `token` is the GitHub Actions OIDC token from oidc.ts, sent as
+ * `Authorization: Bearer`. It's a parameter rather than something this module
+ * mints because minting is I/O and this module is otherwise pure — see
+ * oidc.ts's header comment.
+ *
+ * The service reads its signed claims to learn which repository this run
+ * really belongs to, which is what lets it answer for private repositories
+ * and record the check for the dashboard. A query without it is answered for
+ * public repositories only, and recorded nowhere.
+ */
+export async function queryAckt(input, fetchImpl, token) {
     const url = buildAcktQueryUrl(input);
-    const response = await fetchImpl(url);
+    const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
     if (!response.ok) {
         throw new Error(`ackt query failed: ${response.status} ${response.statusText}`);
     }

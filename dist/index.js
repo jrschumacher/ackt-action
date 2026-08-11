@@ -10,6 +10,7 @@
 import { appendFileSync, readFileSync } from "node:fs";
 import { attestUrl, findAcktComment, formatUtc, renderComment, resetCheckbox } from "./comment.js";
 import { GithubClient } from "./github.js";
+import { mintOidcToken } from "./oidc.js";
 import { queryAckt } from "./query.js";
 import { decideTrigger } from "./trigger.js";
 function getInput(name) {
@@ -21,7 +22,7 @@ function setOutput(name, value) {
         appendFileSync(outputFile, `${name}=${value}\n`);
     }
 }
-const fetchImpl = (url) => fetch(url);
+const fetchImpl = (url, init) => fetch(url, init);
 async function run() {
     const eventName = process.env.GITHUB_EVENT_NAME ?? "";
     const eventPath = process.env.GITHUB_EVENT_PATH ?? "";
@@ -42,6 +43,12 @@ async function run() {
     if (!decision.act) {
         return;
     }
+    // Minted before anything is posted, so a workflow missing `id-token: write`
+    // fails with one clear message and no half-finished side effects — no 👀
+    // reaction on a comment that will never get an answer, no status check.
+    // Deliberately after the trigger decision: most `issue_comment` events are
+    // not ackt's business and must not fail anyone's workflow.
+    const acktToken = await mintOidcToken(process.env, fetchImpl);
     const client = new GithubClient(token);
     let prNumber;
     let triggerCommentId;
@@ -60,7 +67,7 @@ async function run() {
     const pr = await client.getPullRequest(owner, repo, prNumber);
     const actor = pr.user.login;
     const head = pr.head.sha;
-    const result = await queryAckt({ service, repo: `${owner}/${repo}`, pr: prNumber, actor, head }, fetchImpl);
+    const result = await queryAckt({ service, repo: `${owner}/${repo}`, pr: prNumber, actor, head }, fetchImpl, acktToken);
     const link = attestUrl(service, owner, repo, prNumber, head);
     await client.createStatus(owner, repo, head, {
         state: result.attested ? "success" : "pending",
@@ -106,6 +113,14 @@ async function run() {
     }
 }
 run().catch((error) => {
-    console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+    // `::error::` makes the message a workflow annotation — visible on the
+    // summary page without opening the log, which is where someone whose
+    // workflow is missing a permission will actually be looking. Newlines have
+    // to be escaped or GitHub truncates the annotation at the first one.
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`::error::${message.replace(/\r?\n/g, "%0A")}`);
+    if (error instanceof Error && error.stack !== undefined) {
+        console.error(error.stack);
+    }
     process.exitCode = 1;
 });
