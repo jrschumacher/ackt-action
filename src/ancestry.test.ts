@@ -87,20 +87,64 @@ describe("computeAncestryVerdicts", () => {
   });
 
   it("maps a false isAncestor result to 'rewritten'", () => {
-    mockExecFileSync.mockReturnValueOnce(undefined).mockImplementationOnce(() => {
-      throw execError(1);
-    });
+    // Call order: fetch currentHead (succeeds), fetch COMMIT (succeeds),
+    // merge-base --is-ancestor (exits 1).
+    mockExecFileSync
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(undefined)
+      .mockImplementationOnce(() => {
+        throw execError(1);
+      });
     const verdicts = computeAncestryVerdicts([COMMIT], HEAD);
     expect(verdicts.get(COMMIT)).toBe("rewritten");
   });
 
   it("omits a head entirely when isAncestor returns null — never guesses a verdict", () => {
-    mockExecFileSync.mockImplementation(() => {
+    // The currentHead fetch succeeds; COMMIT's own fetch (inside isAncestor)
+    // is what fails here — see the dedicated tests below for a failed
+    // currentHead fetch instead.
+    mockExecFileSync.mockImplementationOnce(() => undefined).mockImplementation(() => {
       throw execError(128);
     });
     const verdicts = computeAncestryVerdicts([COMMIT], HEAD);
     expect(verdicts.has(COMMIT)).toBe(false);
     expect(verdicts.size).toBe(0);
+  });
+
+  it("fetches the current head from origin, without --depth, before computing any verdicts", () => {
+    mockExecFileSync.mockReturnValue(undefined);
+    computeAncestryVerdicts([COMMIT], HEAD);
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(1, "git", ["fetch", "--quiet", "origin", HEAD], { stdio: "ignore" });
+    // Then isAncestor's own fetch of the attested head, then merge-base.
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(2, "git", ["fetch", "--quiet", "origin", COMMIT], { stdio: "ignore" });
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(3, "git", ["merge-base", "--is-ancestor", COMMIT, HEAD], { stdio: "ignore" });
+  });
+
+  it("does not fetch or call isAncestor at all when there are no candidate heads, even if currentHead would fail to fetch", () => {
+    const verdicts = computeAncestryVerdicts([HEAD], HEAD);
+    expect(verdicts.size).toBe(0);
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+
+  it("a failed current-head fetch yields no verdicts, never a false one, and never throws", () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw execError(128);
+    });
+    const verdicts = computeAncestryVerdicts([COMMIT], HEAD);
+    expect(verdicts.size).toBe(0);
+    // Only the currentHead fetch ran — isAncestor (and its own fetch/merge-base) never did.
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(1, "git", ["fetch", "--quiet", "origin", HEAD], { stdio: "ignore" });
+  });
+
+  it("a failed current-head fetch produces unknown for every candidate, not just the first", () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw execError(128);
+    });
+    const other = "6".repeat(40);
+    const verdicts = computeAncestryVerdicts([COMMIT, other], HEAD);
+    expect(verdicts.size).toBe(0);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 
   it("computes an independent verdict per head, skipping only the current one", () => {

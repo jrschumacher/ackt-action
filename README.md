@@ -33,46 +33,40 @@ jobs:
   ackt:
     runs-on: ubuntu-latest
     steps:
-      # issue_comment's event payload carries no PR head SHA at all (only a
-      # pull_request event does — see the checkout step below) — so on that
-      # trigger it has to be resolved from the API before checkout happens.
-      - name: Resolve PR head SHA (issue_comment only)
-        id: pr-head
-        if: github.event_name == 'issue_comment'
-        run: echo "sha=$(gh pr view "${{ github.event.issue.number }}" --json headRefOid -q .headRefOid)" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }} # required — gh resolves the repo from git remotes/GH_REPO, never GITHUB_REPOSITORY; without this it fails "not a git repository" before checkout has even run
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # required — full history, so ancestry can be checked
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || steps.pr-head.outputs.sha }} # required — see "Full history" below
+          fetch-depth: 0 # required — see "Full history" below
       - uses: jrschumacher/ackt-action@v1
 ```
 
 Both triggers are required — see "Triggers" below for why.
 
-`id-token: write`, `fetch-depth: 0`, and the explicit `ref:` are all
-required. The action fails the step without the first; the other two it
-needs to answer ancestry questions about heads attested before the current
-one. None of the three is a default, so copy the block above rather than
-assembling it.
+`id-token: write` and `fetch-depth: 0` are both required. The action fails
+the step without the first; without the second, ancestry results degrade to
+`unknown` rather than the run failing. Neither is a default, so copy the
+block above rather than assembling it.
 
-### Why the checkout needs an explicit `ref:`
+### Why there's no explicit `ref:`
 
-`actions/checkout`'s *default* ref is not the pull request's head on either
-trigger this action listens for: on `pull_request` it's the ephemeral
-**merge ref** (`refs/pull/<n>/merge`, a synthetic commit GitHub builds by
-merging the PR into its base — not the PR's own head), and on
-`issue_comment` it's the **default branch**, because that event has no PR
-context in its payload at all. `git merge-base --is-ancestor` needs the
-real head SHA to compare against, not whatever the default happened to
-check out — comparing against the merge ref in particular *fails safe*
-(older commits still read as ancestors, so a moved head reads `advanced`
-rather than a false `rewritten`) but it is still the wrong answer, and
-`pull_request` is the more common of the two triggers. Resolving and
-passing `ref:` explicitly, as the block above does, is what makes the
-comparison correct rather than merely non-destructive.
+Earlier versions of this workflow needed a conditional step and an explicit
+`ref:` on the checkout, because `actions/checkout`'s *default* ref is not
+the pull request's head on either trigger this action listens for: on
+`pull_request` it's the ephemeral **merge ref** (`refs/pull/<n>/merge`, a
+synthetic commit GitHub builds by merging the PR into its base — not the
+PR's own head), and on `issue_comment` it's the **default branch**, because
+that event has no PR context in its payload at all.
+
+The action no longer depends on what got checked out to answer ancestry
+questions correctly. It resolves the pull request's real head from the
+GitHub API itself — as it always has, for the query above (`actor`/`head`
+never come from the event payload) — and now also fetches that exact commit
+from origin before comparing anything against it, the same way it already
+fetched an attested head that might have been rewritten out of history
+(`src/ancestry.ts`). Whatever ref a caller's checkout step happened to leave
+on disk stops mattering, which is what let this workflow drop the
+conditional `gh pr view` step and the three-way `ref:` expression it fed —
+one less thing an adopter has to paste correctly, and the thing that
+degraded silently to `unknown` when pasted wrong.
 
 ## The OIDC token
 
@@ -103,15 +97,21 @@ an ancestor of the current head — a rebase or force-push removes it, and
 `git merge-base --is-ancestor` is the only thing that can tell those apart.
 `fetch-depth: 0` is what makes that answerable.
 
-Depth alone is not enough, though — see "Why the checkout needs an explicit
-`ref:`" above. Ancestry needs both the *right* history and a comparison
-against the PR's *real* head; `fetch-depth: 0` provides the first,
-`ref:` the second, and this action needs both to answer anything but
-`unknown`. Either one missing degrades ancestry results to `unknown` (never
-a wrong verdict — see `src/ancestry.ts`'s `isAncestor`) rather than
-breaking the run: `id-token: write` is the one requirement this action
-fails the step over, because a missing identity token is a security gap,
-not a precision one.
+The action fetches both sides of every ancestry comparison — an attested
+head and the pull request's current head — by exact SHA before asking git
+anything, so it no longer matters which ref `actions/checkout` happened to
+leave on disk (see "Why there's no explicit `ref:`" above). What that fetch
+does not substitute for is the *history between* those two commits:
+`fetch-depth: 0` is still what supplies that. **Do not drop it** even though
+the explicit `ref:` is gone — a shallow checkout followed by this action's
+own fetch of a single commit is worse than either alone: it leaves
+`.git/shallow` behind and can retroactively sever an *unrelated* commit's
+ancestry, turning a real `advanced` into a false `rewritten` (`src/ancestry.ts`'s
+warning comment on the fetch itself has the full reproduction). A missing
+`fetch-depth: 0` degrades ancestry results to `unknown` rather than breaking
+the run: `id-token: write` is the one requirement this action fails the step
+over, because a missing identity token is a security gap, not a precision
+one.
 
 ## Inputs
 
@@ -168,11 +168,12 @@ this history) or been rewritten out of it (rebase, force-push)? The service
 cannot answer that itself — it has no clone — so the answer comes back in
 two more steps, both local to this action (`src/ancestry.ts`):
 
-1. For each head in `attested_heads` other than the current one, run
-   `git merge-base --is-ancestor <head> <current head sha>` locally.
+1. For each head in `attested_heads` other than the current one, fetch that
+   head and the pull request's current head from origin by exact SHA, then
+   run `git merge-base --is-ancestor <head> <current head sha>` locally.
    `true` → `advanced`; the specific exit code `1` (git checked and said no)
-   → `rewritten`; anything else — a missing object, a shallow clone, the
-   wrong ref checked out — → no verdict at all, never a guess.
+   → `rewritten`; anything else — a missing object, a failed fetch, a
+   shallow clone — → no verdict at all, never a guess.
 2. Report whatever verdicts came out of that (only when there's at least
    one) with the same OIDC token as the query above:
 
