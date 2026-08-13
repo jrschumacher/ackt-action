@@ -1,0 +1,42 @@
+name: ackt author attestation
+
+# The Action running on its own repository. Two reasons this is worth doing
+# beyond symmetry:
+#
+# 1. This repo is public, and jrschumacher/ackt is private. Between them they
+#    exercise both halves of the service's visibility gate — a public repo is
+#    readable by anyone, a private one only by a repository-scoped OIDC token
+#    or a prior participant.
+# 2. A change to dist/ that passes tests but breaks at runtime shows up here,
+#    on the next pull request, rather than in someone else's repository.
+#
+# Pinned to an exact version rather than the moving `v1` tag, so a release is
+# something we choose rather than something that happens to us.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  id-token: write # mints the OIDC token the service verifies — without this the Action fails loudly
+  statuses: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  ackt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Required — the Action needs real history to check ancestry, even
+          # though it fetches its own head SHA.
+          fetch-depth: 0
+
+      - uses: jrschumacher/ackt-action@v0.3.0
+        with:
+          service: https://ackt.dev
+          fail-on-unattested: "false"
