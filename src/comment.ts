@@ -18,11 +18,14 @@
  * caller has something stale to show — so the state is a derived property,
  * not a second source of truth that could disagree with the data driving it.
  *
- * All three share one heading, one green "Attest this PR" button (a linked
- * image served by the same service that records the attestation — see
- * `attestButton`), and one footer, and each carries only what its own state
- * genuinely adds: a sentence naming the commit, the checkbox, and — for
- * "stale" alone — the collapsed history of superseded attestations.
+ * All three share one heading and one footer. "awaiting" and "stale" also
+ * share the green "Attest this PR" button (a linked image served by the same
+ * service that records the attestation — see `attestButton`) and the
+ * checkbox; "attested" has neither, because in that state nobody has anything
+ * left to do. Each then carries only what its own state genuinely adds: a
+ * sentence naming the commit, a link to the read-only record page for
+ * "attested" (see `recordUrl`), and — for "stale" alone — the collapsed
+ * history of superseded attestations.
  *
  * What each state deliberately no longer carries, since a shorter comment
  * that says less is the point rather than a side effect:
@@ -187,6 +190,27 @@ export function attestUrl(service: string, owner: string, repo: string, pr: numb
   return `${service}/a/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${pr}/${head}`;
 }
 
+/**
+ * The read-only attestation record for this pull request — `GET /r/:owner/:repo/:pr`
+ * on the same service. This is where the "attested" state sends a reviewer,
+ * and it is deliberately **not** `attestUrl`: that route is the attest form.
+ * It needs a session, it redirects an anonymous visitor to GitHub's OAuth
+ * authorize endpoint, and its "already attested" lookup is bound to the
+ * *visitor's* login rather than the attestation's — so a reviewer following
+ * it would be shown a form inviting them to attest somebody else's commit.
+ * `/r/…` is read-only, lists every attestation on the pull request, and needs
+ * no sign-in for a public repository.
+ *
+ * No head: the record page is per pull request. A reviewer's question is "who
+ * attested this?", and every row on that page names its own commit.
+ *
+ * Built from the `service` input like every other link this module emits, so
+ * a self-hosted deployment links to itself. Nothing here names ackt.dev.
+ */
+export function recordUrl(service: string, owner: string, repo: string, pr: number): string {
+  return `${service}/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${pr}`;
+}
+
 /** Formats a Date as `YYYY-MM-DD HH:mm` UTC — the "Recorded (UTC)" column shape from the design. */
 export function formatUtc(date: Date): string {
   const pad = (n: number): string => String(n).padStart(2, "0");
@@ -236,8 +260,19 @@ function renderAttested(input: CommentInput, headShort: string): string[] {
     // claims the diff was any *good* — only that a person read it at this
     // commit, which is the whole of what was proven.
     `${profileLink(input.actor)} attested \`${headShort}\`${when}.`,
-    // No button and no checkbox: there is nothing to attest and nothing to
-    // re-check until a new commit lands, at which point this state isn't
+    "",
+    // The one thing this state was missing: somewhere for a reviewer to go.
+    // Until the record page existed there was no surface anywhere that showed
+    // a *reader* the attestation — see `recordUrl` for why the attest link
+    // could never have been it.
+    //
+    // A plain link, deliberately, not a second `attestButton`. The button is
+    // the call to action for the person who still has to do something; this
+    // state's whole point is that nobody does. Restraint here is the same
+    // decision as having no checkbox below it.
+    `[View the record →](${recordUrl(input.service, input.owner, input.repo, input.pr)})`,
+    // Still no button and no checkbox: there is nothing to attest and nothing
+    // to re-check until a new commit lands, at which point this state isn't
     // rendered anymore anyway (the next run sees a different head and
     // renders "awaiting"/"stale" instead).
   ];

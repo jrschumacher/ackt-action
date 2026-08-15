@@ -168,6 +168,55 @@ describe("renderComment — attested", () => {
     expect(body).not.toContain("- [ ]");
     expect(body).not.toContain("attest-button.svg");
   });
+
+  // -------------------------------------------------------------------------
+  // The record link
+  //
+  // Until the service grew `GET /r/:owner/:repo/:pr` there was nowhere to send
+  // a reviewer: `/a/…` is the attest *form*, it 302s an anonymous visitor to
+  // GitHub's OAuth authorize endpoint, and its "already attested" lookup binds
+  // to the visitor's own login — so it shows everybody but the attestor a form
+  // inviting them to attest somebody else's commit. These pin that this state
+  // links the read-only page and not that one.
+  // -------------------------------------------------------------------------
+
+  it("links the read-only record page for this pull request", () => {
+    expect(renderComment(input)).toContain("[View the record →](https://ackt.dev/r/opentdf/platform/3794)");
+  });
+
+  it("links the record page, never the attest form", () => {
+    const body = renderComment(input);
+    expect(body).not.toContain("/a/opentdf/platform");
+  });
+
+  it("builds the record URL from the service input, so a self-hosted deployment links to itself", () => {
+    const body = renderComment({ ...input, service: "https://ackt.internal.example" });
+    expect(body).toContain("[View the record →](https://ackt.internal.example/r/opentdf/platform/3794)");
+    // The footer's attribution still names ackt.dev — that is the tool's name,
+    // not the deployment's address (see `FOOTER`).
+    expect(body).toContain(FOOTER_LINE);
+  });
+
+  it("percent-encodes owner and repo in the record URL", () => {
+    const body = renderComment({ ...input, owner: "a b", repo: "c/d" });
+    expect(body).toContain("https://ackt.dev/r/a%20b/c%2Fd/3794");
+  });
+
+  it("keeps the state's restraint: the link is plain markdown, not a second button", () => {
+    const body = renderComment(input);
+    expect(body).not.toContain("[![");
+    // Sentence, blank line, link — the link is its own line, not tacked onto
+    // the end of the sentence.
+    const lines = body.split("\n").filter((line) => line.trim() !== "");
+    expect(lines).toContain("[View the record →](https://ackt.dev/r/opentdf/platform/3794)");
+  });
+
+  it("is the only state that links the record — the other two send you to attest instead", () => {
+    for (const [name, state] of STATES) {
+      if (name === "attested") continue;
+      expect(renderComment(state), name).not.toContain("View the record");
+    }
+  });
 });
 
 describe("renderComment — stale", () => {
