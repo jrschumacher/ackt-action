@@ -209,3 +209,6 @@ pnpm build   # emits dist/*.js — commit the result
 Zero runtime dependencies, no bundler: the action imports nothing at
 runtime beyond Node and global `fetch`, so plain `tsc` output is a valid
 Node action entry point. `dist/` is committed; CI does not rebuild it.
+
+> Dogfooded: this repository runs the Action on its own pull requests,
+> pinned to an exact version, against the live service at ackt.dev.
