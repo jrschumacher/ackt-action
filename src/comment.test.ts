@@ -21,10 +21,25 @@ const BASE_INPUT: CommentInput = {
   pr: 3794,
   actor: "jrschumacher",
   headSha: "4968d60a36f23ca29993221a36828213fe43b304",
-  headRef: "feature/foo",
-  title: "Add foo",
   attested: false,
 };
+
+const BUTTON = "[![Attest this PR](https://ackt.dev/attest-button.svg)]";
+const FOOTER_LINE = "powered by [ackt.dev](https://ackt.dev)";
+
+/** Every state, keyed by what it is, so the shared-shape suites can walk all three. */
+const STATES: ReadonlyArray<readonly [string, CommentInput]> = [
+  ["awaiting", BASE_INPUT],
+  ["attested", { ...BASE_INPUT, attested: true, recordedAt: "2026-08-09 12:23" }],
+  [
+    "stale",
+    {
+      ...BASE_INPUT,
+      headSha: "91acd0400000000000000000000000000000000",
+      priorAttestations: [{ actor: "jrschumacher", headSha: "e0b3f72c1a4d9f0b5e6a7c8d9e0f1a2b3c4d5e6f", recordedAt: "2026-08-09 12:23" }],
+    },
+  ],
+];
 
 describe("renderComment", () => {
   it("always contains the marker, in every state", () => {
@@ -50,48 +65,108 @@ describe("renderComment", () => {
   });
 });
 
+describe("renderComment — the shape all three states share", () => {
+  it.each(STATES)("%s: uses the same heading, with no state suffix and no glyph", (_name, input) => {
+    const body = renderComment(input);
+    expect(body).toContain("### Human review attestation\n");
+    expect(body).not.toContain("Human review attestation —");
+    expect(body).not.toContain("✔");
+    expect(body).not.toContain("⚠");
+  });
+
+  it.each(STATES)("%s: ends with the footer, then the marker", (_name, input) => {
+    const body = renderComment(input);
+    expect(body.endsWith(`\n---\n${FOOTER_LINE}\n\n${ACKT_COMMENT_MARKER}`)).toBe(true);
+  });
+
+  it.each(STATES)("%s: has a blank line before the footer rule, so `---` is a rule and not a setext underline", (_name, input) => {
+    expect(renderComment(input)).toContain("\n\n---\n");
+  });
+
+  it.each(STATES)("%s: has no context line repeating the PR title or branch", (_name, input) => {
+    expect(renderComment(input)).not.toContain("<sub>");
+  });
+
+  it.each(STATES)("%s: does not advertise the /ackt slash command", (_name, input) => {
+    // trigger.ts still honours it; the comment just stopped explaining two
+    // re-trigger paths where one click does. Matched with its backticks
+    // because the bare string `/ackt` is also a substring of `https://ackt.dev`.
+    expect(renderComment(input)).not.toContain("`/ackt`");
+  });
+});
+
+describe("renderComment — the attest button", () => {
+  it("is a linked image whose alt text is the call to action, so it degrades to a working text link", () => {
+    // If camo is down, images are blocked, or a screen reader is reading the
+    // comment, the alt text is the entire CTA.
+    const body = renderComment(BASE_INPUT);
+    expect(body).toContain(`${BUTTON}(https://ackt.dev/a/opentdf/platform/3794/${BASE_INPUT.headSha})`);
+  });
+
+  it("appears in both states that have something to attest", () => {
+    expect(renderComment(BASE_INPUT)).toContain(BUTTON);
+    expect(renderComment(STATES[2]![1])).toContain(BUTTON);
+  });
+
+  it("is absent from the attested state — there is nothing left to attest", () => {
+    expect(renderComment(STATES[1]![1])).not.toContain("attest-button.svg");
+  });
+
+  it("takes the asset from the configured service, so a self-hosted deployment serves its own", () => {
+    const body = renderComment({ ...BASE_INPUT, service: "https://ackt.example.com" });
+    expect(body).toContain("[![Attest this PR](https://ackt.example.com/attest-button.svg)]");
+    expect(body).not.toContain("https://ackt.dev/attest-button.svg");
+  });
+});
+
 describe("renderComment — awaiting", () => {
-  it("renders the awaiting heading and names the current commit", () => {
+  it("says, in one line, that nobody has attested the current commit", () => {
     const body = renderComment(BASE_INPUT);
-    expect(body).toContain("Human review attestation — awaiting");
-    expect(body).toContain("`4968d60`");
+    expect(body).toContain("Nobody has attested `4968d60` yet.");
   });
 
-  it("renders a prominent attest link/CTA for the current head", () => {
+  it("does not restate that the attestation covers exactly this commit — naming the SHA already says it", () => {
+    expect(renderComment(BASE_INPUT)).not.toContain("covers exactly");
+  });
+
+  it("keeps the re-check checkbox, unchecked, under the button", () => {
     const body = renderComment(BASE_INPUT);
-    expect(body).toContain(`[Attest to this diff](https://ackt.dev/a/opentdf/platform/3794/${BASE_INPUT.headSha})`);
+    expect(body).toContain("- [ ] Re-check after attesting");
+    expect(body.indexOf(BUTTON)).toBeLessThan(body.indexOf("- [ ]"));
   });
 
-  it("notes that commenting /ackt re-runs the check", () => {
-    expect(renderComment(BASE_INPUT)).toMatch(/\/ackt/);
-  });
-
-  it("keeps the re-check checkbox, unchecked, next to the CTA", () => {
-    expect(renderComment(BASE_INPUT)).toContain("- [ ] Re-check attestation");
+  it("is short: heading, button, one sentence, the checkbox, the two footer lines, the marker", () => {
+    // A count, not a snapshot, so it fails loudly the moment a line creeps
+    // back in — which is exactly how the old render got verbose.
+    const lines = renderComment(BASE_INPUT).split("\n").filter((line) => line.trim() !== "");
+    expect(lines).toHaveLength(7);
   });
 });
 
 describe("renderComment — attested", () => {
   const input: CommentInput = { ...BASE_INPUT, attested: true, recordedAt: "2026-08-09 12:23" };
 
-  it("renders the attested heading", () => {
-    expect(renderComment(input)).toContain("Human review attestation — ✔ attested");
-  });
-
-  it("renders a table with Author / Commit / Recorded (UTC) columns", () => {
+  it("states who attested what and when, in a sentence rather than a one-row table", () => {
     const body = renderComment(input);
-    expect(body).toContain("| Author | Commit | Recorded (UTC) |");
-    expect(body).toContain("[@jrschumacher](https://github.com/jrschumacher)");
-    expect(body).toContain("`4968d60`");
-    expect(body).toContain("2026-08-09 12:23");
+    expect(body).toContain("[@jrschumacher](https://github.com/jrschumacher) attested `4968d60` on 2026-08-09 12:23 UTC.");
+    expect(body).not.toContain("| Author | Commit | Recorded (UTC) |");
   });
 
-  it("states the attestation covers exactly this commit and that new commits reset it", () => {
-    expect(renderComment(input)).toMatch(/Covers exactly `4968d60`\. New commits reset the check\./);
+  it("claims nothing about the diff's quality — only that a person read it at that commit", () => {
+    const body = renderComment(input);
+    expect(body).not.toMatch(/approved|reviewed and|looks good|verified the/i);
   });
 
-  it("does not render the re-check checkbox — there is nothing to re-check yet", () => {
-    expect(renderComment(input)).not.toContain("- [ ] Re-check attestation");
+  it("omits the timestamp clause rather than rendering an empty one when recordedAt is absent", () => {
+    const body = renderComment({ ...BASE_INPUT, attested: true });
+    expect(body).toContain("attested `4968d60`.");
+    expect(body).not.toContain("UTC");
+  });
+
+  it("renders no button and no checkbox — there is nothing to attest and nothing to re-check", () => {
+    const body = renderComment(input);
+    expect(body).not.toContain("- [ ]");
+    expect(body).not.toContain("attest-button.svg");
   });
 });
 
@@ -106,19 +181,18 @@ describe("renderComment — stale", () => {
     priorAttestations: prior,
   };
 
-  it("renders the stale heading and names the new/current commit", () => {
+  it("names the commit the head moved to", () => {
     const body = renderComment(input);
-    expect(body).toContain("Human review attestation — ⚠ stale");
-    expect(body).toContain("`91acd04`");
+    expect(body).toContain("The head moved to `91acd04`.");
   });
 
   it("offers a way to attest the new diff", () => {
     const body = renderComment(input);
-    expect(body).toContain(`[Attest to the new diff](https://ackt.dev/a/opentdf/platform/3794/${input.headSha})`);
+    expect(body).toContain(`${BUTTON}(https://ackt.dev/a/opentdf/platform/3794/${input.headSha})`);
   });
 
-  it("keeps the re-check checkbox, unchecked, next to the re-attest prompt", () => {
-    expect(renderComment(input)).toContain("- [ ] Re-check attestation");
+  it("keeps the re-check checkbox, unchecked, under the button", () => {
+    expect(renderComment(input)).toContain("- [ ] Re-check after attesting");
   });
 
   it("puts the prior attestation(s) inside a collapsed <details>, each marked superseded", () => {
@@ -135,9 +209,15 @@ describe("renderComment — stale", () => {
     expect(detailsBlock).toContain("[@jrschumacher](https://github.com/jrschumacher)");
   });
 
+  it("keeps the collapsed history — who attested what, and when, is the record this tool exists to keep", () => {
+    const body = renderComment(input);
+    expect(body.indexOf("<details>")).toBeGreaterThan(body.indexOf("- [ ]"));
+    expect(body.indexOf("<details>")).toBeLessThan(body.indexOf("---\n" + FOOTER_LINE));
+  });
+
   it("falls back to the awaiting render when priorAttestations is empty", () => {
     const body = renderComment({ ...BASE_INPUT, attested: false, priorAttestations: [] });
-    expect(body).toContain("Human review attestation — awaiting");
+    expect(body).toContain("Nobody has attested `4968d60` yet.");
   });
 });
 
@@ -164,21 +244,12 @@ describe("escapeMarkdown", () => {
 });
 
 describe("renderComment escaping of attacker-controlled fields", () => {
-  it("a malicious branch name is neutralized in the context line", () => {
-    const body = renderComment({ ...BASE_INPUT, headRef: "evil|`<script>alert(1)</script>`" });
-    expect(body).not.toContain("<script>");
-    expect(body).not.toContain("`<script>");
-    expect(body).toContain("evil\\|&#96;&lt;script&gt;alert\\(1\\)&lt;/script&gt;&#96;");
-  });
+  // The branch name and PR title are no longer interpolated at all — the
+  // context line that carried them is gone — so the two tests that used to
+  // guard their escaping went with it. `escapeMarkdown` itself is still
+  // covered above, and every remaining interpolation is exercised below.
 
-  it("a malicious PR title is neutralized in the context line", () => {
-    const body = renderComment({ ...BASE_INPUT, title: "Fix | bug `here` <b>now</b>" });
-    expect(body).not.toContain("<b>");
-    expect(body).not.toContain("</b>");
-    expect(body).toContain("Fix \\| bug &#96;here&#96; &lt;b&gt;now&lt;/b&gt;");
-  });
-
-  it("a malicious actor login is neutralized in the attested table row and profile link", () => {
+  it("a malicious actor login is neutralized in the attested sentence and profile link", () => {
     const body = renderComment({
       ...BASE_INPUT,
       attested: true,
@@ -240,44 +311,79 @@ describe("findAcktComment", () => {
 });
 
 describe("isCheckboxChecked", () => {
+  it("detects the label that renderComment actually ships — the pairing that makes the re-trigger work", () => {
+    // The single most breakable link in the feature: `trigger.ts` acts on an
+    // `issue_comment edited` whose box went from unchecked to checked, and
+    // this is what "checked" means. A label the detector doesn't recognise
+    // kills the re-trigger silently, with nothing anywhere to notice.
+    const rendered = renderComment(BASE_INPUT);
+    expect(isCheckboxChecked(rendered)).toBe(false);
+    expect(isCheckboxChecked(rendered.replace("- [ ]", "- [x]"))).toBe(true);
+  });
+
   it("is false for an unchecked box", () => {
-    expect(isCheckboxChecked("- [ ] Re-check attestation")).toBe(false);
+    expect(isCheckboxChecked("- [ ] Re-check after attesting")).toBe(false);
   });
 
   it("is true for a checked box", () => {
-    expect(isCheckboxChecked("- [x] Re-check attestation")).toBe(true);
+    expect(isCheckboxChecked("- [x] Re-check after attesting")).toBe(true);
   });
 
   it("is true for an uppercase checked box", () => {
-    expect(isCheckboxChecked("- [X] Re-check attestation")).toBe(true);
+    expect(isCheckboxChecked("- [X] Re-check after attesting")).toBe(true);
+  });
+
+  it("still recognises the previous label, so a comment already on a PR keeps working", () => {
+    expect(isCheckboxChecked("- [x] Re-check attestation")).toBe(true);
+    expect(isCheckboxChecked("- [ ] Re-check attestation")).toBe(false);
   });
 
   it("is false when the checkbox is absent", () => {
     expect(isCheckboxChecked("no checkbox here at all")).toBe(false);
   });
+
+  it("is false for the attested render, which ships no checkbox at all", () => {
+    expect(isCheckboxChecked(renderComment({ ...BASE_INPUT, attested: true, recordedAt: "2026-08-09 12:23" }))).toBe(false);
+  });
 });
 
 describe("resetCheckbox", () => {
   it("resets a checked box to unchecked", () => {
-    expect(resetCheckbox("before\n- [x] Re-check attestation\nafter")).toBe("before\n- [ ] Re-check attestation\nafter");
+    expect(resetCheckbox("before\n- [x] Re-check after attesting\nafter")).toBe("before\n- [ ] Re-check after attesting\nafter");
   });
 
   it("resets an uppercase checked box to unchecked", () => {
-    expect(resetCheckbox("- [X] Re-check attestation")).toBe("- [ ] Re-check attestation");
+    expect(resetCheckbox("- [X] Re-check after attesting")).toBe("- [ ] Re-check after attesting");
+  });
+
+  it("rewrites the previous label to the current one, migrating a comment already on a PR", () => {
+    expect(resetCheckbox("- [x] Re-check attestation")).toBe("- [ ] Re-check after attesting");
   });
 
   it("is idempotent on an already-unchecked box", () => {
-    const once = resetCheckbox("- [ ] Re-check attestation");
+    const once = resetCheckbox("- [ ] Re-check after attesting");
     expect(resetCheckbox(once)).toBe(once);
   });
 
   it("is idempotent applied twice to a checked box", () => {
-    const once = resetCheckbox("- [x] Re-check attestation");
+    const once = resetCheckbox("- [x] Re-check after attesting");
     const twice = resetCheckbox(once);
     expect(twice).toBe(once);
   });
 
   it("leaves a body with no checkbox unchanged", () => {
     expect(resetCheckbox("nothing to see here")).toBe("nothing to see here");
+  });
+
+  it("round-trips a rendered comment: reset leaves it byte-identical, marker included", () => {
+    // `index.ts` pipes every render through `resetCheckbox` before posting.
+    // If that ever mangled the body, the marker could stop matching and the
+    // Action would post a new comment on every run instead of editing its own.
+    for (const [, input] of STATES) {
+      const rendered = renderComment(input);
+      expect(resetCheckbox(rendered)).toBe(rendered);
+      expect(resetCheckbox(rendered)).toContain(ACKT_COMMENT_MARKER);
+      expect(findAcktComment([{ id: 1, body: resetCheckbox(rendered), user: { login: BOT_LOGIN } }])?.id).toBe(1);
+    }
   });
 });
