@@ -18,6 +18,27 @@
  * caller has something stale to show — so the state is a derived property,
  * not a second source of truth that could disagree with the data driving it.
  *
+ * All three share one heading and one footer. "awaiting" and "stale" also
+ * share the green "Attest this PR" button (a linked image served by the same
+ * service that records the attestation — see `attestButton`) and the
+ * checkbox; "attested" has neither, because in that state nobody has anything
+ * left to do. Each then carries only what its own state genuinely adds: a
+ * sentence naming the commit, a link to the read-only record page for
+ * "attested" (see `recordUrl`), and — for "stale" alone — the collapsed
+ * history of superseded attestations.
+ *
+ * What each state deliberately no longer carries, since a shorter comment
+ * that says less is the point rather than a side effect:
+ *
+ *  - The `<sub>` context line repeating the PR title and branch. GitHub
+ *    already renders both directly above the comment.
+ *  - The two-sentence italic footnote explaining `/ackt` *and* the checkbox.
+ *    `/ackt` still works — trigger.ts is untouched — it is simply no longer
+ *    advertised, because the box is one click and needs no explaining.
+ *  - "The attestation covers exactly this commit." Naming the short SHA in
+ *    the sentence above it already says that.
+ *  - The ✔/⚠ state suffix on the heading; see `HEADING`.
+ *
  * The design's mockups show a custom `ackt[bot]` avatar and display name —
  * that requires a GitHub App this project deliberately does not have, so
  * only the comment *content* below follows the design; the bot identity
@@ -40,17 +61,60 @@ export const ACKT_COMMENT_MARKER = "<!-- ackt:comment v=1 -->";
  */
 export const BOT_LOGIN = "github-actions[bot]";
 
-const CHECKBOX_LABEL = "Re-check attestation";
-const CHECKBOX_RE = new RegExp(`-\\s*\\[([ xX])\\]\\s*${CHECKBOX_LABEL}`);
+const CHECKBOX_LABEL = "Re-check after attesting";
+/**
+ * Deliberately looser than `CHECKBOX_LINE`: it matches any `Re-check …` label
+ * to the end of the line, not this exact wording. Comments already posted by
+ * an earlier version of the Action say "Re-check attestation", and a reader
+ * who ticks one of those boxes must still trigger a run — a label change that
+ * the detector doesn't recognise silently kills the re-trigger, with no error
+ * anywhere to notice. The same looseness lets `resetCheckbox` rewrite an old
+ * label to the current one in place, so an old comment migrates the first time
+ * it is updated.
+ */
+const CHECKBOX_RE = /-[ \t]*\[([ xX])\][ \t]*Re-check[^\n]*/;
 /**
  * The design (ackt-system.dc.html §3d) has no checkbox — it only mentions
  * `/ackt` as a slash-command re-trigger. The checkbox is kept anyway: it's a
  * deliberate product decision (one click, no typing required) that predates
- * and survives this redesign. See `renderAwaiting`/`renderStale` for where
- * it's folded into each state's layout, and the module-level report for why
- * `renderAttested` omits it.
+ * and survives this redesign. It is now the *only* advertised re-trigger
+ * path: `/ackt` still works (trigger.ts is unchanged) but explaining both
+ * paths cost two sentences of italic footnote to save one click, which is
+ * what made the old comment read as verbose. See `renderAwaiting`/
+ * `renderStale` for where it sits, and `renderAttested` for why that state
+ * has no box at all.
  */
 const CHECKBOX_LINE = `- [ ] ${CHECKBOX_LABEL}`;
+
+/**
+ * The button, as a linked image — a GitHub comment is markdown, so that is
+ * what a button is there. Three things are load-bearing:
+ *
+ *  - **The alt text is the call to action.** If camo is down, the reader
+ *    blocks images, or a screen reader is reading the comment, `Attest this
+ *    PR` is all that is left — and it degrades to a working text link rather
+ *    than a broken-image icon. It matches the label drawn in the asset.
+ *  - **The asset comes from the same service the attestation does.** A
+ *    self-hosted deployment serves its own button, exactly as it serves its
+ *    own `/a/…` links; nothing here points at ackt.dev by name.
+ *  - **Verified, not assumed.** GitHub proxies external images through camo,
+ *    and camo serving SVG was checked against a live PR rather than
+ *    remembered. See the service's `attestButtonSvg()` for the rest.
+ */
+function attestButton(service: string, url: string): string {
+  return `[![Attest this PR](${service}/attest-button.svg)](${url})`;
+}
+
+/**
+ * Shared by all three states. Attribution for the tool, so it names ackt
+ * whatever service produced the attestation — unlike `attestButton`'s asset
+ * and `attestUrl`'s link, which follow the configured deployment.
+ *
+ * The `---` needs the blank line above it that `renderComment` supplies, or
+ * markdown reads it as a setext underline and turns the preceding paragraph
+ * into a heading.
+ */
+const FOOTER = ["---", "powered by [ackt.dev](https://ackt.dev)"];
 
 export interface GithubComment {
   readonly id: number;
@@ -72,8 +136,12 @@ export interface CommentInput {
   readonly pr: number;
   readonly actor: string;
   readonly headSha: string;
-  readonly headRef: string;
-  readonly title: string;
+  /**
+   * No `title` or `headRef`: the comment used to open with a `<sub>` line
+   * carrying both, and GitHub renders the PR title and the branch name
+   * directly above every comment on the page. Restating them was the comment
+   * telling the reader something the page had already told them.
+   */
   readonly attested: boolean;
   readonly statementSha256?: string;
   /** When `attested` is true: when the current head's attestation was recorded (UTC, `formatUtc` shape). */
@@ -122,6 +190,27 @@ export function attestUrl(service: string, owner: string, repo: string, pr: numb
   return `${service}/a/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${pr}/${head}`;
 }
 
+/**
+ * The read-only attestation record for this pull request — `GET /r/:owner/:repo/:pr`
+ * on the same service. This is where the "attested" state sends a reviewer,
+ * and it is deliberately **not** `attestUrl`: that route is the attest form.
+ * It needs a session, it redirects an anonymous visitor to GitHub's OAuth
+ * authorize endpoint, and its "already attested" lookup is bound to the
+ * *visitor's* login rather than the attestation's — so a reviewer following
+ * it would be shown a form inviting them to attest somebody else's commit.
+ * `/r/…` is read-only, lists every attestation on the pull request, and needs
+ * no sign-in for a public repository.
+ *
+ * No head: the record page is per pull request. A reviewer's question is "who
+ * attested this?", and every row on that page names its own commit.
+ *
+ * Built from the `service` input like every other link this module emits, so
+ * a self-hosted deployment links to itself. Nothing here names ackt.dev.
+ */
+export function recordUrl(service: string, owner: string, repo: string, pr: number): string {
+  return `${service}/r/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${pr}`;
+}
+
 /** Formats a Date as `YYYY-MM-DD HH:mm` UTC — the "Recorded (UTC)" column shape from the design. */
 export function formatUtc(date: Date): string {
   const pad = (n: number): string => String(n).padStart(2, "0");
@@ -134,70 +223,75 @@ function profileLink(actor: string): string {
 }
 
 /**
- * Identifies which PR/branch this comment belongs to. Kept to one `<sub>`
- * line rather than a table row — the comment already lives on the PR it
- * describes, and the "keep it short" constraint rules out spending a whole
- * table row on redundant context.
+ * The same heading in all three states, with no state suffix and no ✔/⚠ glyph.
+ *
+ * Two reasons the state left the heading. GitHub already publishes this
+ * comment's verdict as a commit status (index.ts posts one, with the same
+ * `attestUrl` as its `target_url`) — the pass/fail signal a reader scans for
+ * lives in the checks panel, and repeating it in the heading was the comment
+ * competing with a surface that does it better. And each state's first line
+ * of body now says the fact in words, which a screen reader and a plaintext
+ * client both read correctly; `— ✔ attested` does not.
  */
-function contextLine(input: CommentInput): string {
-  return `<sub>${escapeMarkdown(input.title)} (\`${escapeMarkdown(input.headRef)}\`)</sub>`;
-}
+const HEADING = "### Human review attestation";
 
 function renderAwaiting(input: CommentInput, url: string, headShort: string): string[] {
   return [
-    "### Human review attestation — awaiting",
+    HEADING,
     "",
-    contextLine(input),
+    attestButton(input.service, url),
     "",
-    `No one has attested to reading this diff at \`${headShort}\` yet.`,
+    // The short SHA does the work the deleted "covers exactly this commit"
+    // sentence used to: naming the commit *is* the scope claim.
+    `Nobody has attested \`${headShort}\` yet.`,
     "",
-    `**[Attest to this diff](${url})**`,
-    "",
-    // Checkbox placement: directly under the CTA it duplicates, so both
-    // re-trigger paths (click the box, or comment /ackt) sit together.
     CHECKBOX_LINE,
-    "",
-    "_After attesting, comment `/ackt` — or check the box above — to re-run the check. The attestation covers exactly this commit._",
   ];
 }
 
 function renderAttested(input: CommentInput, headShort: string): string[] {
   const recordedAt = input.recordedAt !== undefined ? escapeMarkdown(input.recordedAt) : "";
+  const when = recordedAt === "" ? "" : ` on ${recordedAt} UTC`;
   return [
-    "### Human review attestation — ✔ attested",
+    HEADING,
     "",
-    contextLine(input),
+    // A one-row table is heavier than the sentence it holds; the "stale"
+    // state keeps its table because it has a list to tabulate. Nothing here
+    // claims the diff was any *good* — only that a person read it at this
+    // commit, which is the whole of what was proven.
+    `${profileLink(input.actor)} attested \`${headShort}\`${when}.`,
     "",
-    "| Author | Commit | Recorded (UTC) |",
-    "|---|---|---|",
-    `| ${profileLink(input.actor)} | \`${headShort}\` | ${recordedAt} |`,
-    "",
-    // No checkbox here, unlike the other two states: there is nothing to
-    // re-check until a new commit lands, at which point this state isn't
+    // The one thing this state was missing: somewhere for a reviewer to go.
+    // Until the record page existed there was no surface anywhere that showed
+    // a *reader* the attestation — see `recordUrl` for why the attest link
+    // could never have been it.
+    //
+    // A plain link, deliberately, not a second `attestButton`. The button is
+    // the call to action for the person who still has to do something; this
+    // state's whole point is that nobody does. Restraint here is the same
+    // decision as having no checkbox below it.
+    `[View the record →](${recordUrl(input.service, input.owner, input.repo, input.pr)})`,
+    // Still no button and no checkbox: there is nothing to attest and nothing
+    // to re-check until a new commit lands, at which point this state isn't
     // rendered anymore anyway (the next run sees a different head and
     // renders "awaiting"/"stale" instead).
-    `_Covers exactly \`${headShort}\`. New commits reset the check._`,
   ];
 }
 
 function renderStale(input: CommentInput, url: string, headShort: string): string[] {
   const prior = input.priorAttestations ?? [];
   return [
-    "### Human review attestation — ⚠ stale",
+    HEADING,
     "",
-    contextLine(input),
+    attestButton(input.service, url),
     "",
-    `The head moved to \`${headShort}\`. Earlier attestations below cover commits this PR no longer points at.`,
+    `The head moved to \`${headShort}\`. Earlier attestations cover commits this PR no longer points at.`,
     "",
-    `**[Attest to the new diff](${url})**`,
-    "",
-    // Checkbox placement: same reasoning as "awaiting" — right next to the
-    // re-attest prompt, so the one-click path sits next to the CTA it
-    // duplicates rather than buried after the collapsed history below.
     CHECKBOX_LINE,
     "",
-    "_Comment `/ackt` — or check the box above — to attest the new diff._",
-    "",
+    // Kept, collapsed: who attested what, and when, is real information —
+    // it is the record this whole tool exists to keep. Only the prose around
+    // it was redundant.
     "<details>",
     `<summary>Attestation history (${prior.length})</summary>`,
     "",
@@ -228,7 +322,7 @@ export function renderComment(input: CommentInput): string {
       ? renderStale(input, url, headShort)
       : renderAwaiting(input, url, headShort);
 
-  return [...body, "", ACKT_COMMENT_MARKER].join("\n");
+  return [...body, "", ...FOOTER, "", ACKT_COMMENT_MARKER].join("\n");
 }
 
 /**

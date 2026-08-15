@@ -117,7 +117,7 @@ one.
 
 | Input | Default | Description |
 |---|---|---|
-| `service` | `https://ackt.dev` | Base URL of the ackt service to query and link to. This repo's own [`.github/workflows/ackt.yml`](../.github/workflows/ackt.yml) overrides this to the live preview deployment (`https://ackt-preview.j-r-schumacher.workers.dev`) because `ackt.dev` isn't live yet — see the comment there. |
+| `service` | `https://ackt.dev` | Base URL of the ackt service to query and link to. `ackt.dev` is live, and this repo's own [`.github/workflows/ackt.yml`](.github/workflows/ackt.yml) uses it — the workflow here is the same one the docs hand to adopters, deliberately, so the example we publish is one we actually run. Override this only when pointing at your own deployment of the service. |
 | `fail-on-unattested` | `false` | When `true`, the job fails if the PR author hasn't attested the current head. Leave this `false` unless you specifically want the job's own pass/fail (rather than the status check) to gate something — most consumers, including policy-bot, should read the `ackt / human-review` status check instead, not this job's outcome. |
 | `github-token` | `${{ github.token }}` | Token used to read the PR, post the comment, post the status, and add reactions. The default workflow token is sufficient. |
 

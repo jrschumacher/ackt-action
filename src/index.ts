@@ -104,8 +104,6 @@ async function run(): Promise<void> {
       pr: prNumber,
       actor,
       headSha: head,
-      headRef: pr.head.ref,
-      title: pr.title,
       attested: result.attested,
       // The query API reports whether the current head is attested, not
       // when — this run's own clock is the best available answer to "when

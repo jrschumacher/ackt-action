@@ -10,6 +10,7 @@ function issueCommentEvent(overrides: {
   action: string;
   body: string;
   login?: string;
+  sender?: string;
   isPullRequest?: boolean;
   previousBody?: string;
 }): unknown {
@@ -25,6 +26,7 @@ function issueCommentEvent(overrides: {
       user: { login: overrides.login ?? "someone" },
     },
     ...(overrides.previousBody !== undefined ? { changes: { body: { from: overrides.previousBody } } } : {}),
+    ...(overrides.sender !== undefined ? { sender: { login: overrides.sender } } : {}),
   };
 }
 
@@ -56,13 +58,69 @@ describe("decideTrigger — issue_comment guards", () => {
     expect(decision.reason).toMatch(/bot itself/);
   });
 
-  it("does not self-trigger on the bot's own checkbox-resetting edit", () => {
+  it("does not self-trigger on the bot's own checkbox-resetting edit (sender is the bot)", () => {
     const decision = decideTrigger(
       "issue_comment",
-      issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation", login: BOT_LOGIN, previousBody: "- [x] Re-check attestation" }),
+      issueCommentEvent({
+        action: "edited",
+        body: "- [ ] Re-check attestation",
+        login: BOT_LOGIN,
+        sender: BOT_LOGIN,
+        previousBody: "- [x] Re-check attestation",
+      }),
     );
     expect(decision.act).toBe(false);
     expect(decision.reason).toMatch(/bot itself/);
+  });
+
+  it("acts on a human-sent edit of the bot's own comment — the checkbox click itself", () => {
+    // This is the bug: the comment is always bot-authored (the checkbox
+    // lives on the bot's own comment by design), so keying the guard on the
+    // comment *author* instead of the edit *sender* meant this could never
+    // fire. `login` here is deliberately the bot — only `sender` (the human
+    // who clicked) should matter.
+    const decision = decideTrigger(
+      "issue_comment",
+      issueCommentEvent({
+        action: "edited",
+        body: "- [x] Re-check attestation",
+        login: BOT_LOGIN,
+        sender: "a-human-reviewer",
+        previousBody: "- [ ] Re-check attestation",
+      }),
+    );
+    expect(decision.act).toBe(true);
+    expect(decision.reason).toMatch(/checkbox newly checked/);
+  });
+
+  it("does not act on a human-sent edit when the box was already checked (no transition)", () => {
+    const decision = decideTrigger(
+      "issue_comment",
+      issueCommentEvent({
+        action: "edited",
+        body: "- [x] Re-check attestation",
+        login: BOT_LOGIN,
+        sender: "a-human-reviewer",
+        previousBody: "- [x] Re-check attestation",
+      }),
+    );
+    expect(decision.act).toBe(false);
+    expect(decision.reason).not.toMatch(/bot itself/);
+  });
+
+  it("fails closed — refuses when an edited comment has no sender at all", () => {
+    const decision = decideTrigger(
+      "issue_comment",
+      issueCommentEvent({
+        action: "edited",
+        body: "- [x] Re-check attestation",
+        login: BOT_LOGIN,
+        previousBody: "- [ ] Re-check attestation",
+        // no `sender` override — simulates a malformed/unexpected payload
+      }),
+    );
+    expect(decision.act).toBe(false);
+    expect(decision.reason).toMatch(/no sender/);
   });
 });
 
@@ -97,7 +155,7 @@ describe("decideTrigger — issue_comment edited, checkbox transitions", () => {
   it("acts when the checkbox goes from unchecked to checked", () => {
     const decision = decideTrigger(
       "issue_comment",
-      issueCommentEvent({ action: "edited", body: "- [x] Re-check attestation", previousBody: "- [ ] Re-check attestation" }),
+      issueCommentEvent({ action: "edited", body: "- [x] Re-check attestation", sender: "someone", previousBody: "- [ ] Re-check attestation" }),
     );
     expect(decision.act).toBe(true);
   });
@@ -105,7 +163,7 @@ describe("decideTrigger — issue_comment edited, checkbox transitions", () => {
   it("does not act when the checkbox was already checked", () => {
     const decision = decideTrigger(
       "issue_comment",
-      issueCommentEvent({ action: "edited", body: "- [x] Re-check attestation", previousBody: "- [x] Re-check attestation" }),
+      issueCommentEvent({ action: "edited", body: "- [x] Re-check attestation", sender: "someone", previousBody: "- [x] Re-check attestation" }),
     );
     expect(decision.act).toBe(false);
   });
@@ -113,7 +171,7 @@ describe("decideTrigger — issue_comment edited, checkbox transitions", () => {
   it("does not act when the checkbox remains unchecked", () => {
     const decision = decideTrigger(
       "issue_comment",
-      issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation", previousBody: "- [ ] Re-check attestation" }),
+      issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation", sender: "someone", previousBody: "- [ ] Re-check attestation" }),
     );
     expect(decision.act).toBe(false);
   });
@@ -121,13 +179,16 @@ describe("decideTrigger — issue_comment edited, checkbox transitions", () => {
   it("does not act when the checkbox goes from checked to unchecked", () => {
     const decision = decideTrigger(
       "issue_comment",
-      issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation", previousBody: "- [x] Re-check attestation" }),
+      issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation", sender: "someone", previousBody: "- [x] Re-check attestation" }),
     );
     expect(decision.act).toBe(false);
   });
 
   it("does not act on an edit with no previous body available and no checkbox checked", () => {
-    const decision = decideTrigger("issue_comment", issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation" }));
+    const decision = decideTrigger(
+      "issue_comment",
+      issueCommentEvent({ action: "edited", body: "- [ ] Re-check attestation", sender: "someone" }),
+    );
     expect(decision.act).toBe(false);
   });
 
@@ -135,7 +196,10 @@ describe("decideTrigger — issue_comment edited, checkbox transitions", () => {
     // No `changes.body.from` means we can't know the prior state; treat it
     // as previously unchecked so a checked box still triggers rather than
     // being silently swallowed.
-    const decision = decideTrigger("issue_comment", issueCommentEvent({ action: "edited", body: "- [x] Re-check attestation" }));
+    const decision = decideTrigger(
+      "issue_comment",
+      issueCommentEvent({ action: "edited", body: "- [x] Re-check attestation", sender: "someone" }),
+    );
     expect(decision.act).toBe(true);
   });
 });
