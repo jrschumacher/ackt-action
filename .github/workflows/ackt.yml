@@ -36,7 +36,7 @@ jobs:
           # though it fetches its own head SHA.
           fetch-depth: 0
 
-      - uses: jrschumacher/ackt-action@v0.3.0
+      - uses: jrschumacher/ackt-action@v0.4.0
         with:
           service: https://ackt.dev
           fail-on-unattested: "false"
