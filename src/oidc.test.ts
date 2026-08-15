@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { buildTokenRequestUrl, mintOidcToken, parseTokenResponse, workflowFileFromRef, OIDC_AUDIENCE, type TokenFetchLike } from "./oidc.js";
+import {
+  buildTokenRequestUrl,
+  mintOidcToken,
+  oidcEndpointPresent,
+  parseTokenResponse,
+  workflowFileFromRef,
+  FORK_DEGRADED_MESSAGE,
+  OIDC_AUDIENCE,
+  type TokenFetchLike,
+} from "./oidc.js";
 
 const REQUEST_URL = "https://pipelines.actions.githubusercontent.com/abc/idtoken?api-version=2.0";
 const REQUEST_TOKEN = "runner-request-token";
@@ -117,5 +126,52 @@ describe("mintOidcToken", () => {
 
   it("throws on a malformed minting response rather than sending a bogus token", async () => {
     await expect(mintOidcToken(env(), fakeFetch({ ok: true, body: { oops: true } }))).rejects.toThrow(/malformed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// I4. The same absence means two opposite things, and only the caller knows
+// which — see index.ts, which pairs this with `isForkPullRequest`.
+// ---------------------------------------------------------------------------
+
+describe("oidcEndpointPresent", () => {
+  it("is true when the runner exposed both variables", () => {
+    expect(oidcEndpointPresent(env())).toBe(true);
+  });
+
+  it("is false when either variable is missing or empty", () => {
+    expect(oidcEndpointPresent(env({ ACTIONS_ID_TOKEN_REQUEST_URL: undefined }))).toBe(false);
+    expect(oidcEndpointPresent(env({ ACTIONS_ID_TOKEN_REQUEST_TOKEN: undefined }))).toBe(false);
+    expect(oidcEndpointPresent(env({ ACTIONS_ID_TOKEN_REQUEST_URL: "" }))).toBe(false);
+    expect(oidcEndpointPresent(env({ ACTIONS_ID_TOKEN_REQUEST_TOKEN: "" }))).toBe(false);
+  });
+
+  it("agrees with mintOidcToken about what counts as absent", async () => {
+    const absent = env({ ACTIONS_ID_TOKEN_REQUEST_URL: undefined });
+    expect(oidcEndpointPresent(absent)).toBe(false);
+    await expect(mintOidcToken(absent, fakeFetch({ ok: true, body: { value: JWT } }))).rejects.toThrow(/id-token: write/);
+  });
+});
+
+describe("FORK_DEGRADED_MESSAGE", () => {
+  // The previous behaviour was an error telling a maintainer to add a
+  // permission that was already present. Each assertion below is one thing
+  // that failure got wrong.
+  it("names the fork as the cause", () => {
+    expect(FORK_DEGRADED_MESSAGE).toContain("fork");
+  });
+
+  it("does not tell the reader to add a permission — the point is that nothing is missing", () => {
+    expect(FORK_DEGRADED_MESSAGE).not.toContain("id-token: write");
+    expect(FORK_DEGRADED_MESSAGE).toContain("nothing to add to the workflow file");
+  });
+
+  it("states exactly what is lost: recording and ancestry, not the check itself", () => {
+    expect(FORK_DEGRADED_MESSAGE).toContain("not recorded");
+    expect(FORK_DEGRADED_MESSAGE).toContain("ancestry is not reported");
+  });
+
+  it("survives a ::warning:: annotation — one line, no newlines to truncate at", () => {
+    expect(FORK_DEGRADED_MESSAGE).not.toContain("\n");
   });
 });

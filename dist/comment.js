@@ -18,6 +18,13 @@
  * caller has something stale to show — so the state is a derived property,
  * not a second source of truth that could disagree with the data driving it.
  *
+ * The "stale" state was, until this fix, unreachable: nothing in the Action
+ * ever passed `priorAttestations`, so a push rendered "awaiting" — "Nobody
+ * has attested `newhead` yet" — and the history the record page keeps
+ * vanished from the surface everyone actually reads. `buildCommentHistory`
+ * (below) is where that data is now assembled, from the service's own
+ * records rather than from this run's clock.
+ *
  * All three share one heading and one footer. "awaiting" and "stale" also
  * share the green "Attest this PR" button (a linked image served by the same
  * service that records the attestation — see `attestButton`) and the
@@ -167,6 +174,69 @@ export function recordUrl(service, owner, repo, pr) {
 export function formatUtc(date) {
     const pad = (n) => String(n).padStart(2, "0");
     return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+}
+/**
+ * `formatUtc` for the service's RFC 3339 `verified_at`, or `null` if it isn't
+ * a date. Never a placeholder and never today: a timestamp the comment cannot
+ * read is one it must not print.
+ */
+function formatVerifiedAt(verifiedAt) {
+    const date = new Date(verifiedAt);
+    return Number.isNaN(date.getTime()) ? null : formatUtc(date);
+}
+/**
+ * The seam. Turns `GET /api/v1/attestations`' records into the two
+ * `CommentInput` fields that describe *when things happened*, and it is the
+ * reason both of those fields are now reachable in production at all.
+ *
+ * It exists as a named, exported function rather than a few lines inside
+ * index.ts because of how the two bugs it fixes survived. `comment.test.ts`
+ * tested the "stale" render thoroughly — by handing `priorAttestations` to
+ * the renderer itself — so the suite could prove the state rendered correctly
+ * while being structurally unable to notice that nothing ever built it. A
+ * renderer test cannot see an empty seam. This function is that seam, in the
+ * one place a test can hold it.
+ *
+ * Two decisions worth stating:
+ *
+ *  - **`recordedAt` is the *first* attestation of the current head by this
+ *    actor**, not the most recent and emphatically not `new Date()`. The
+ *    comment's sentence is "@actor attested `abc1234` on …", a claim about
+ *    when a person acted; re-attesting the same head later doesn't move when
+ *    they first did. The run's own clock was the previous answer, which meant
+ *    any re-run — a `/ackt`, a ticked checkbox, a reopen days later — rewrote
+ *    the date on a claim about a human act.
+ *  - **`priorAttestations` is every attestation on the pull request that
+ *    doesn't cover the current head, by anyone**, oldest first, deduplicated
+ *    by (actor, head). Not scoped to this actor: the table has an Author
+ *    column precisely because more than one person can have attested here,
+ *    and "history is the point" (SPEC §4.9) is not a per-author claim.
+ */
+export function buildCommentHistory(records, actor, headSha) {
+    const lowerActor = actor.toLowerCase();
+    const current = records.find((r) => r.head === headSha && r.actor.toLowerCase() === lowerActor);
+    const recordedAt = current === undefined ? null : formatVerifiedAt(current.verifiedAt);
+    const seen = new Set();
+    const prior = [];
+    for (const record of records) {
+        if (record.head === headSha)
+            continue;
+        const key = `${record.actor.toLowerCase()} ${record.head}`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        prior.push({
+            actor: record.actor,
+            headSha: record.head,
+            // The raw value if it won't parse — whatever the service actually said
+            // beats inventing a shape for it.
+            recordedAt: formatVerifiedAt(record.verifiedAt) ?? record.verifiedAt,
+        });
+    }
+    return {
+        ...(recordedAt !== null ? { recordedAt } : {}),
+        ...(prior.length > 0 ? { priorAttestations: prior } : {}),
+    };
 }
 /** A GitHub profile link for an (escaped) actor login — used anywhere an author appears in a table cell. */
 function profileLink(actor) {

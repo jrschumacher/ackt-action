@@ -11,7 +11,10 @@
  *
  * Nothing here touches the network or the filesystem; every decision is a
  * pure function of the event name and payload, which is what makes the
- * whole matrix testable without a single mock.
+ * whole matrix testable without a single mock. `isForkPullRequest` is here
+ * for that reason too — it is a second question about the same payload, and
+ * index.ts (the untestable shell) should be reading answers, not deriving
+ * them.
  */
 
 import { isCheckboxChecked } from "./comment.js";
@@ -37,6 +40,48 @@ export interface TriggerDecision {
 
 interface PullRequestPayload {
   readonly action: string;
+}
+
+interface ForkShapedPayload {
+  readonly pull_request?: {
+    readonly head?: { readonly repo?: { readonly full_name?: unknown } | null };
+    readonly base?: { readonly repo?: { readonly full_name?: unknown } | null };
+  };
+}
+
+/**
+ * Whether this event is a `pull_request` whose head lives in a *different*
+ * repository than its base — i.e. an outside contribution.
+ *
+ * Exists for one reason: GitHub refuses to issue an Actions OIDC token on a
+ * fork-origin `pull_request`, whatever `permissions:` the workflow declares
+ * (see oidc.ts's `FORK_DEGRADED_MESSAGE`). Without this, the Action failed
+ * that run red and told the maintainer to add a permission that was already
+ * there — on the exact scenario ackt exists for, a public repository taking
+ * outside contributions.
+ *
+ * Decided by comparing head and base repository names in the payload rather
+ * than by reading `GITHUB_REPOSITORY` or `pull_request.head.repo.fork`: the
+ * comparison is what actually matters (a fork's own internal PR is not a
+ * fork-origin run and does get a token), and it keeps this a pure function of
+ * the event, testable with no environment at all.
+ *
+ * `issue_comment` is deliberately never a fork run: that event executes in
+ * the base repository's context with the base repository's permissions, and
+ * mints a token normally even when the PR came from a fork.
+ *
+ * A deleted or otherwise absent head repository counts as a fork — it is
+ * certainly not the base repository, and the fallback that follows (a
+ * degraded, unrecorded run) is the safe direction for a case we cannot read.
+ */
+export function isForkPullRequest(eventName: string, payload: unknown): boolean {
+  if (eventName !== "pull_request") return false;
+  const pr = (payload as ForkShapedPayload | null | undefined)?.pull_request;
+  if (pr === undefined) return false;
+  const headRepo = pr.head?.repo?.full_name;
+  const baseRepo = pr.base?.repo?.full_name;
+  if (typeof baseRepo !== "string" || baseRepo.length === 0) return false; // can't tell; treat as same-repo and fail loudly as before
+  return headRepo !== baseRepo;
 }
 
 interface IssueCommentPayload {

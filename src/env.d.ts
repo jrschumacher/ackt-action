@@ -40,11 +40,20 @@ declare module "node:fs" {
  * than typing the `encoding`-present overload as `string`) since there's no
  * `Buffer` type available without `@types/node` for the other branch, and
  * every caller casts explicitly at the one call site that needs a string.
+ *
+ * `stdio` also accepts the per-stream tuple form, for the one call that wants
+ * both halves of it at once: `isShallowRepository` has to *read* stdout (so
+ * not `"ignore"`) while still discarding stderr (so not the default), which
+ * only `["ignore", "pipe", "ignore"]` expresses.
  */
 declare module "node:child_process" {
   export function execFileSync(
     command: string,
     args: readonly string[],
-    options?: { readonly stdio?: "ignore"; readonly cwd?: string; readonly encoding?: "utf8" },
+    options?: {
+      readonly stdio?: "ignore" | readonly ("ignore" | "pipe" | "inherit")[];
+      readonly cwd?: string;
+      readonly encoding?: "utf8";
+    },
   ): unknown;
 }
