@@ -47,20 +47,39 @@ function decideIssueComment(payload) {
         return { act: false, reason: "comment is on an issue, not a pull request" };
     }
     // The Action edits its own comment to reset the checkbox after handling a
-    // trigger, which fires `issue_comment: edited` again. Without this guard
-    // that is an infinite loop: our own edit is itself a checkbox transition,
-    // and (separately) our own initial post mentions "/ackt" in its body.
-    // Checked before the created/edited branches below so it applies to both.
-    if (payload.comment.user.login === BOT_LOGIN) {
-        return { act: false, reason: "comment is from the bot itself — refusing to self-trigger" };
-    }
+    // trigger, which fires `issue_comment: edited` again. Without a guard that
+    // is an infinite loop. But "who authored the comment" and "who performed
+    // this event" are different questions, and only the second one tells the
+    // two `edited` cases apart:
+    //   - the bot resets its own checkbox (must NOT re-trigger)
+    //   - a human ticks the checkbox on the bot's own comment (MUST trigger —
+    //     this is the whole point of the checkbox, and the comment is always
+    //     bot-authored by design, so keying on the author here would refuse
+    //     every human click)
+    // `comment.user.login` (the author) only distinguishes the two cases on
+    // `created`, where the bot's own initial post mentions "/ackt" in its body
+    // and must not self-trigger. On `edited`, key on `sender` (the account
+    // that performed the edit) instead. A missing `sender` fails closed
+    // (refuse) rather than open, since this is a loop-capable path.
     if (payload.action === "created") {
+        if (payload.comment.user.login === BOT_LOGIN) {
+            return { act: false, reason: "comment is from the bot itself — refusing to self-trigger" };
+        }
         if (ACKT_COMMAND_RE.test(payload.comment.body)) {
             return { act: true, reason: "issue_comment created with /ackt" };
         }
         return { act: false, reason: "new comment does not contain /ackt at the start of a line" };
     }
     if (payload.action === "edited") {
+        const senderLogin = payload.sender?.login;
+        if (senderLogin === undefined || senderLogin === BOT_LOGIN) {
+            return {
+                act: false,
+                reason: senderLogin === undefined
+                    ? "edited comment has no sender — refusing to self-trigger (fail closed)"
+                    : "comment was edited by the bot itself — refusing to self-trigger",
+            };
+        }
         const previousBody = payload.changes?.body?.from;
         const nowChecked = isCheckboxChecked(payload.comment.body);
         const wasChecked = previousBody !== undefined && isCheckboxChecked(previousBody);
