@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { buildAcktQueryUrl, buildAncestryPostUrl, parseAcktResponse, postAncestry, queryAckt, type FetchLike } from "./query.js";
+import {
+  buildAcktQueryUrl,
+  buildAncestryPostUrl,
+  buildAttestationsQueryUrl,
+  parseAcktResponse,
+  parseAttestationRecords,
+  postAncestry,
+  queryAckt,
+  queryAttestations,
+  type FetchLike,
+} from "./query.js";
 
 const INPUT = {
   service: "https://ackt.dev",
@@ -221,5 +231,114 @@ describe("postAncestry", () => {
 
   it("throws on a non-ok HTTP response", async () => {
     await expect(postAncestry(ANCESTRY_INPUT, fakePostFetch({ ok: false, status: 401, statusText: "Unauthorized" }), TOKEN)).rejects.toThrow(/401/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/attestations — the records the comment's timestamps and history
+// are built from (I2/I3).
+// ---------------------------------------------------------------------------
+
+describe("buildAttestationsQueryUrl", () => {
+  it("builds the expected path and query parameters", () => {
+    const url = new URL(buildAttestationsQueryUrl({ service: "https://ackt.dev", repo: "opentdf/platform", pr: 3794 }));
+    expect(url.origin + url.pathname).toBe("https://ackt.dev/api/v1/attestations");
+    expect(url.searchParams.get("repo")).toBe("opentdf/platform");
+    expect(url.searchParams.get("pr")).toBe("3794");
+  });
+
+  it("respects a service base URL with a trailing slash — a self-hosted deployment queries itself", () => {
+    const url = buildAttestationsQueryUrl({ service: "https://ackt.example/", repo: "o/r", pr: 1 });
+    expect(url.startsWith("https://ackt.example/api/v1/attestations?")).toBe(true);
+  });
+});
+
+describe("parseAttestationRecords", () => {
+  const ROW = { actor: "jrschumacher", head: "a".repeat(40), verified_at: "2026-08-15T14:02:03Z" };
+
+  it("decodes actor, head and verified_at, and ignores the rest of the record shape", () => {
+    const rows = parseAttestationRecords({ records: [{ ...ROW, credential_id: "x", aaguid: "y", uv: true }] });
+    expect(rows).toEqual([{ actor: "jrschumacher", head: "a".repeat(40), verifiedAt: "2026-08-15T14:02:03Z" }]);
+  });
+
+  it("preserves the service's verified_at ASC order — oldest first is what makes a history read as one", () => {
+    const older = { ...ROW, head: "1".repeat(40), verified_at: "2026-08-09T12:23:00Z" };
+    const newer = { ...ROW, head: "2".repeat(40), verified_at: "2026-08-15T14:02:03Z" };
+    expect(parseAttestationRecords({ records: [older, newer] }).map((r) => r.head)).toEqual([older.head, newer.head]);
+  });
+
+  // The opposite policy to parseAcktResponse, deliberately: `attested` is a
+  // security decision and must fail loudly; these records are decoration and
+  // must never be able to fail a run. See the function's doc comment.
+  it("returns [] rather than throwing for a non-object body", () => {
+    expect(parseAttestationRecords(null)).toEqual([]);
+    expect(parseAttestationRecords("nope")).toEqual([]);
+  });
+
+  it("returns [] rather than throwing when records is absent or not an array", () => {
+    expect(parseAttestationRecords({})).toEqual([]);
+    expect(parseAttestationRecords({ records: "nope" })).toEqual([]);
+  });
+
+  it("skips individual malformed rows rather than throwing away the good ones", () => {
+    const rows = parseAttestationRecords({ records: [ROW, null, 42, { actor: "x" }, { ...ROW, verified_at: 5 }, { ...ROW, head: "b".repeat(40) }] });
+    expect(rows.map((r) => r.head)).toEqual(["a".repeat(40), "b".repeat(40)]);
+  });
+});
+
+describe("queryAttestations", () => {
+  const TOKEN = "eyJhbGciOiJSUzI1NiJ9.header.signature";
+  const RECORDS_INPUT = { service: "https://ackt.dev", repo: "opentdf/platform", pr: 3794 };
+
+  interface Call {
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  function fakeFetch(response: { ok: boolean; status?: number; statusText?: string; body?: unknown }, calls: Call[] = []): FetchLike {
+    return async (url, init) => {
+      calls.push({ url, headers: init.headers });
+      return {
+        ok: response.ok,
+        status: response.status ?? (response.ok ? 200 : 500),
+        statusText: response.statusText ?? "",
+        json: async () => response.body,
+      };
+    };
+  }
+
+  it("sends the OIDC token as an Authorization: Bearer header", async () => {
+    const calls: Call[] = [];
+    await queryAttestations(RECORDS_INPUT, fakeFetch({ ok: true, body: { records: [] } }, calls), TOKEN);
+    expect(calls[0]?.headers.Authorization).toBe(`Bearer ${TOKEN}`);
+    expect(calls[0]?.url).toBe(buildAttestationsQueryUrl(RECORDS_INPUT));
+  });
+
+  // The fork case (I4): no token exists to send, so the header is omitted
+  // entirely rather than sent empty — that is the unauthenticated query the
+  // service already answers for a public repository.
+  it("omits the Authorization header entirely when there is no token", async () => {
+    const calls: Call[] = [];
+    await queryAttestations(RECORDS_INPUT, fakeFetch({ ok: true, body: { records: [] } }, calls), null);
+    expect(calls[0]?.headers.Authorization).toBeUndefined();
+    expect(calls[0]?.headers.Accept).toBe("application/json");
+  });
+
+  it("throws on a non-ok HTTP response — the call site is what treats that as non-fatal", async () => {
+    await expect(queryAttestations(RECORDS_INPUT, fakeFetch({ ok: false, status: 404, statusText: "Not Found" }), null)).rejects.toThrow(/404/);
+  });
+});
+
+describe("queryAckt without a token — the fork-degraded path (I4)", () => {
+  it("omits the Authorization header rather than sending an empty Bearer", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, headers: init.headers });
+      return { ok: true, status: 200, statusText: "OK", json: async () => ({ attested: false }) };
+    };
+    const result = await queryAckt(INPUT, fetchImpl, null);
+    expect(result.attested).toBe(false);
+    expect(calls[0]?.headers.Authorization).toBeUndefined();
+    expect(Object.keys(calls[0]?.headers ?? {})).toEqual(["Accept"]);
   });
 });

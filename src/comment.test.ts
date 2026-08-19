@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACKT_COMMENT_MARKER,
   BOT_LOGIN,
+  buildCommentHistory,
   escapeMarkdown,
   findAcktComment,
   formatUtc,
@@ -434,5 +435,135 @@ describe("resetCheckbox", () => {
       expect(resetCheckbox(rendered)).toContain(ACKT_COMMENT_MARKER);
       expect(findAcktComment([{ id: 1, body: resetCheckbox(rendered), user: { login: BOT_LOGIN } }])?.id).toBe(1);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// I2/I3. The seam, tested where the data is assembled rather than where it is
+// rendered.
+//
+// Everything above hands `renderComment` its `priorAttestations` and
+// `recordedAt` directly, which is exactly why the suite could not notice that
+// production supplied neither: the "stale" state was proved correct and was
+// simultaneously unreachable, and the attested state's date came from the
+// run's own clock. These tests hold the other end.
+// ---------------------------------------------------------------------------
+
+describe("buildCommentHistory", () => {
+  const HEAD = "4968d60a36f23ca29993221a36828213fe43b304";
+  const OLDER = "e0b3f72c1a4d9f0b5e6a7c8d9e0f1a2b3c4d5e6f";
+  const OLDEST = "1111111111111111111111111111111111111111";
+
+  it("takes recordedAt from the service's verified_at for this actor at this head", () => {
+    const history = buildCommentHistory([{ actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-09T12:23:45Z" }], "jrschumacher", HEAD);
+    expect(history.recordedAt).toBe("2026-08-09 12:23");
+  });
+
+  // I3, stated as a test: the timestamp is a claim about when a person acted.
+  // A re-run days later must not move it.
+  // I3. The date is a claim about when a person acted; a re-run — a `/ackt`,
+  // a ticked checkbox, a reopen days later — must not rewrite it.
+  it("reads the record's clock, not this run's", () => {
+    const records = [{ actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-09T12:23:45Z" }];
+    expect(buildCommentHistory(records, "jrschumacher", HEAD)).toEqual(buildCommentHistory(records, "jrschumacher", HEAD));
+    expect(buildCommentHistory(records, "jrschumacher", HEAD).recordedAt).not.toBe(formatUtc(new Date()));
+  });
+
+  it("keeps the first attestation of this head, not a later re-attestation of it", () => {
+    const history = buildCommentHistory(
+      [
+        { actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-09T12:23:45Z" },
+        { actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-15T09:00:00Z" },
+      ],
+      "jrschumacher",
+      HEAD,
+    );
+    expect(history.recordedAt).toBe("2026-08-09 12:23");
+  });
+
+  it("matches the actor case-insensitively, the way GitHub logins work", () => {
+    const history = buildCommentHistory([{ actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-09T12:23:45Z" }], "JRSchumacher", HEAD);
+    expect(history.recordedAt).toBe("2026-08-09 12:23");
+  });
+
+  it("omits recordedAt entirely when nothing covers the current head — claims less rather than guessing", () => {
+    expect(buildCommentHistory([], "jrschumacher", HEAD).recordedAt).toBeUndefined();
+    expect(buildCommentHistory([{ actor: "someone", head: OLDER, verifiedAt: "2026-08-09T12:23:45Z" }], "jrschumacher", HEAD).recordedAt).toBeUndefined();
+  });
+
+  it("omits recordedAt rather than printing a nonsense date when verified_at will not parse", () => {
+    expect(buildCommentHistory([{ actor: "jrschumacher", head: HEAD, verifiedAt: "not a date" }], "jrschumacher", HEAD).recordedAt).toBeUndefined();
+  });
+
+  it("collects every attestation that does not cover the current head, oldest first", () => {
+    const history = buildCommentHistory(
+      [
+        { actor: "jrschumacher", head: OLDEST, verifiedAt: "2026-08-01T08:00:00Z" },
+        { actor: "someone-else", head: OLDER, verifiedAt: "2026-08-09T12:23:45Z" },
+      ],
+      "jrschumacher",
+      HEAD,
+    );
+    expect(history.priorAttestations).toEqual([
+      { actor: "jrschumacher", headSha: OLDEST, recordedAt: "2026-08-01 08:00" },
+      { actor: "someone-else", headSha: OLDER, recordedAt: "2026-08-09 12:23" },
+    ]);
+  });
+
+  it("never lists the current head as prior — it has not been superseded by anything", () => {
+    const history = buildCommentHistory(
+      [
+        { actor: "jrschumacher", head: OLDER, verifiedAt: "2026-08-09T12:23:45Z" },
+        { actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-15T09:00:00Z" },
+      ],
+      "jrschumacher",
+      HEAD,
+    );
+    expect(history.priorAttestations?.map((a) => a.headSha)).toEqual([OLDER]);
+  });
+
+  it("deduplicates a head re-attested by the same person into one row", () => {
+    const history = buildCommentHistory(
+      [
+        { actor: "jrschumacher", head: OLDER, verifiedAt: "2026-08-09T12:23:45Z" },
+        { actor: "JRSchumacher", head: OLDER, verifiedAt: "2026-08-10T12:23:45Z" },
+      ],
+      "jrschumacher",
+      HEAD,
+    );
+    expect(history.priorAttestations).toHaveLength(1);
+    expect(history.priorAttestations?.[0]?.recordedAt).toBe("2026-08-09 12:23");
+  });
+
+  it("omits priorAttestations entirely when there are none, so renderComment picks 'awaiting'", () => {
+    const history = buildCommentHistory([{ actor: "jrschumacher", head: HEAD, verifiedAt: "2026-08-09T12:23:45Z" }], "jrschumacher", HEAD);
+    expect(history.priorAttestations).toBeUndefined();
+    expect(renderComment({ ...BASE_INPUT, attested: false, ...history })).toContain("Nobody has attested");
+  });
+
+  it("shows the service's raw value rather than inventing one when a prior verified_at will not parse", () => {
+    const history = buildCommentHistory([{ actor: "jrschumacher", head: OLDER, verifiedAt: "whenever" }], "jrschumacher", HEAD);
+    expect(history.priorAttestations?.[0]?.recordedAt).toBe("whenever");
+  });
+
+  // The reachability proof the old suite could not make: real service records
+  // in, the "stale" render out — no test-authored `priorAttestations` anywhere.
+  it("reaches the stale render from records alone, which nothing in production previously did", () => {
+    const history = buildCommentHistory(
+      [{ actor: "jrschumacher", head: OLDER, verifiedAt: "2026-08-09T12:23:45Z" }],
+      "jrschumacher",
+      "91acd0400000000000000000000000000000000",
+    );
+    const body = renderComment({ ...BASE_INPUT, headSha: "91acd0400000000000000000000000000000000", attested: false, ...history });
+    expect(body).toContain("The head moved to `91acd04`.");
+    expect(body).toContain("<summary>Attestation history (1)</summary>");
+    expect(body).toContain("e0b3f72");
+    expect(body).not.toContain("Nobody has attested");
+  });
+
+  // And the attested render, likewise assembled rather than supplied.
+  it("reaches the attested render's date from records alone", () => {
+    const history = buildCommentHistory([{ actor: "jrschumacher", head: BASE_INPUT.headSha, verifiedAt: "2026-08-09T12:23:45Z" }], "jrschumacher", BASE_INPUT.headSha);
+    expect(renderComment({ ...BASE_INPUT, attested: true, ...history })).toContain("attested `4968d60` on 2026-08-09 12:23 UTC.");
   });
 });

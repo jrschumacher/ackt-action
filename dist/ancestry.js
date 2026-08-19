@@ -17,6 +17,13 @@
  * disk — the only thing a workflow still has to get right is
  * `fetch-depth: 0`, so the *history between* those two fetched commits is
  * actually there; see the README's "Full history" section.
+ *
+ * A workflow that gets that one thing wrong is now *detected* rather than
+ * mis-answered: `computeAncestryVerdicts` asks `git rev-parse
+ * --is-shallow-repository` once and reports nothing at all from a shallow
+ * clone (`isShallowRepository`). That is what makes the README's and the
+ * /docs page's standing claim — "dropping `fetch-depth: 0` degrades ancestry
+ * results to unknown" — actually true.
  */
 import { execFileSync } from "node:child_process";
 /**
@@ -54,9 +61,47 @@ function fetchCommit(sha) {
     }
 }
 /**
+ * Whether the checked-out repository is shallow. `actions/checkout` clones
+ * `--depth=1` unless a caller sets `fetch-depth: 0`, so this is the state
+ * every adopter starts from.
+ *
+ * This is the guard the earlier `--depth` fix missed, and it is the whole
+ * reason `computeAncestryVerdicts` asks before trusting anything git says.
+ * `fetchCommit` restores the two *endpoints* of a comparison; in a full clone
+ * that is enough, but in a shallow one the history *between* them is simply
+ * absent — and `git merge-base --is-ancestor A H` then exits **1**, not 128.
+ * Exit 1 is the one code `isAncestor` reads as definitive ("git checked and
+ * the answer is no"), so a consumer who merely omitted `fetch-depth: 0` was
+ * told, confidently and falsely, that the commit they signed for had been
+ * rewritten out of the pull request. Reproduced against real git, starting
+ * from a `git clone --depth=1`, in `ancestry.realgit.test.ts` — a repro has
+ * to clone a `file://` URL, because git silently ignores `--depth` for a
+ * plain local path.
+ *
+ * Anything other than a literal `false` counts as shallow, including a git
+ * that failed to answer at all: if the clone's own shape can't be
+ * established, nothing git says about ancestry can be trusted either, and
+ * reporting no verdict (which the service records as `unknown`) is the
+ * honest answer to both.
+ */
+function isShallowRepository() {
+    try {
+        const output = execFileSync("git", ["rev-parse", "--is-shallow-repository"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+        return String(output).trim() !== "false";
+    }
+    catch {
+        return true; // git could not tell us: refuse to trust any ancestry answer from this clone
+    }
+}
+/**
  * Exact, and the reason the merge-base commit set was abandoned: membership in
  * any set proves "still here" but never "gone". --is-ancestor is the actual
  * question.
+ *
+ * Callers must have established that the repository is **not** shallow first
+ * — see `isShallowRepository`, and `computeAncestryVerdicts`, which is the
+ * only production caller and does exactly that. In a shallow clone this
+ * function returns a confident, wrong `false`.
  *
  * Any failure — shallow checkout, missing commit, wrong HEAD — reports nothing
  * for that head, which the service records as unknown. A failure never
@@ -117,6 +162,16 @@ export function computeAncestryVerdicts(attestedHeads, currentHead) {
     const candidates = attestedHeads.filter((head) => head !== currentHead);
     if (candidates.length === 0)
         return verdicts;
+    // Asked once per run, not once per head: shallowness is a property of the
+    // clone, not of the commit being asked about. See `isShallowRepository` for
+    // what a shallow clone does to `--is-ancestor` and why no verdict at all is
+    // the only honest output here.
+    if (isShallowRepository()) {
+        console.warn("::warning::ackt did not check commit ancestry: this workspace is a shallow clone. " +
+            "Add 'fetch-depth: 0' to the actions/checkout step — see https://ackt.dev/docs. " +
+            "Ancestry for earlier attested commits is reported as unknown for this run.");
+        return verdicts;
+    }
     if (!fetchCommit(currentHead)) {
         return verdicts; // git could not even fetch the head we'd compare against: unknown for every candidate
     }

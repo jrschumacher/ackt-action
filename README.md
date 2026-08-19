@@ -83,11 +83,38 @@ The runner only exposes the minting endpoint when the workflow grants
 with a message naming the permission and the workflow file — it does not
 fall back to an unauthenticated request. A silent fallback would still go
 green and still answer for public repos, so the only symptom would be a
-dashboard that never populates and nothing in the log to explain why.
+dashboard that never populates and nothing in the log to explain why. The
+one exception is a pull request from a fork, where GitHub withholds the
+token regardless — see "Pull requests from forks" below.
 
 Granting `id-token: write` lets *this* workflow mint identity tokens for
 any audience; it grants nothing about the repository's contents, and it is
 independent of the `GITHUB_TOKEN` permissions above.
+
+## Pull requests from forks
+
+There is one case where the minting endpoint is missing and the workflow
+file is not at fault: a `pull_request` event **from a fork**. GitHub does
+not issue an OIDC token to a fork-origin run whatever `permissions:` you
+declare, and it downgrades that run's `GITHUB_TOKEN` to read-only at the
+same time.
+
+The action detects this and continues in a reduced mode rather than failing
+the step:
+
+- the attestation query still runs, unauthenticated — which the service
+  answers for **public** repositories, so the `attested` output is still
+  correct there;
+- the check is **not recorded**, so it does not appear on the dashboard;
+- **no ancestry** is reported, since that endpoint has no unauthenticated
+  path;
+- the status check, comment and reactions are attempted and, if GitHub
+  refuses them with the read-only token, skipped with a warning rather than
+  failing the job.
+
+Every one of those emits a `::warning::` naming the fork as the reason. For
+a private repository the unauthenticated query is answered with a 404 and
+the step does fail — there is no degraded read to fall back to.
 
 ## Full history
 
@@ -107,11 +134,16 @@ the explicit `ref:` is gone — a shallow checkout followed by this action's
 own fetch of a single commit is worse than either alone: it leaves
 `.git/shallow` behind and can retroactively sever an *unrelated* commit's
 ancestry, turning a real `advanced` into a false `rewritten` (`src/ancestry.ts`'s
-warning comment on the fetch itself has the full reproduction). A missing
-`fetch-depth: 0` degrades ancestry results to `unknown` rather than breaking
-the run: `id-token: write` is the one requirement this action fails the step
-over, because a missing identity token is a security gap, not a precision
-one.
+warning comment on the fetch itself has the full reproduction).
+
+A missing `fetch-depth: 0` degrades ancestry results to `unknown` rather
+than breaking the run, and that is enforced rather than hoped for: the
+action asks `git rev-parse --is-shallow-repository` before it trusts any
+ancestry answer, and reports no verdict at all from a shallow clone. (It
+did not always: before that check, a plain default checkout produced a
+confident, false `rewritten`.) `id-token: write` is the one requirement this action
+fails the step over, because a missing identity token is a security gap,
+not a precision one.
 
 ## Inputs
 
@@ -168,13 +200,20 @@ this history) or been rewritten out of it (rebase, force-push)? The service
 cannot answer that itself — it has no clone — so the answer comes back in
 two more steps, both local to this action (`src/ancestry.ts`):
 
-1. For each head in `attested_heads` other than the current one, fetch that
-   head and the pull request's current head from origin by exact SHA, then
-   run `git merge-base --is-ancestor <head> <current head sha>` locally.
+1. First, once per run, check `git rev-parse --is-shallow-repository`. If
+   the workspace is shallow — the `actions/checkout` default — stop here and
+   report **nothing**, with a warning naming `fetch-depth: 0`. This is not
+   caution: in a shallow clone both commits still fetch cleanly by SHA while
+   the history between them is absent, so `--is-ancestor` exits `1`, which
+   is exactly the code that means "git checked and said no". Without the
+   check, omitting `fetch-depth: 0` produced a confident, false `rewritten`.
+2. Then, for each head in `attested_heads` other than the current one, fetch
+   that head and the pull request's current head from origin by exact SHA,
+   and run `git merge-base --is-ancestor <head> <current head sha>` locally.
    `true` → `advanced`; the specific exit code `1` (git checked and said no)
-   → `rewritten`; anything else — a missing object, a failed fetch, a
-   shallow clone — → no verdict at all, never a guess.
-2. Report whatever verdicts came out of that (only when there's at least
+   → `rewritten`; anything else — a missing object, a failed fetch — → no
+   verdict at all, never a guess.
+3. Report whatever verdicts came out of that (only when there's at least
    one) with the same OIDC token as the query above:
 
    ```
@@ -209,3 +248,6 @@ pnpm build   # emits dist/*.js — commit the result
 Zero runtime dependencies, no bundler: the action imports nothing at
 runtime beyond Node and global `fetch`, so plain `tsc` output is a valid
 Node action entry point. `dist/` is committed; CI does not rebuild it.
+
+> Dogfooded: this repository runs the Action on its own pull requests,
+> pinned to an exact version, against the live service at ackt.dev.

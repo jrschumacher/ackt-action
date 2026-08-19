@@ -1,5 +1,6 @@
 /**
- * Pure URL construction and response parsing for `GET /api/v1/ackt` and
+ * Pure URL construction and response parsing for `GET /api/v1/ackt`,
+ * `GET /api/v1/attestations` and
  * `POST /api/v1/ancestry` (docs/superpowers/specs/2026-08-11-dashboard-design.md,
  * "Two-phase: git answers the question git can answer"). The one impure
  * piece — calling `fetch` — is a thin wrapper that takes the fetch
@@ -44,6 +45,19 @@ export function parseAcktResponse(data) {
     return { attested: record.attested, statementSha256, attestedHeads: parseAttestedHeads(record) };
 }
 /**
+ * `null` means "this run has no OIDC token and legitimately cannot get one" —
+ * the fork case (oidc.ts's `FORK_DEGRADED_MESSAGE`). The header is then
+ * omitted entirely rather than sent empty, which is exactly the
+ * unauthenticated query the service already answers for public repositories.
+ * Never a fallback for a *failed* mint: index.ts still fails loudly there.
+ */
+function authHeaders(token) {
+    const headers = { Accept: "application/json" };
+    if (token !== null)
+        headers.Authorization = `Bearer ${token}`;
+    return headers;
+}
+/**
  * `token` is the GitHub Actions OIDC token from oidc.ts, sent as
  * `Authorization: Bearer`. It's a parameter rather than something this module
  * mints because minting is I/O and this module is otherwise pure — see
@@ -51,16 +65,69 @@ export function parseAcktResponse(data) {
  *
  * The service reads its signed claims to learn which repository this run
  * really belongs to, which is what lets it answer for private repositories
- * and record the check for the dashboard. A query without it is answered for
- * public repositories only, and recorded nowhere.
+ * and record the check for the dashboard. A query without it (`null` — see
+ * `authHeaders`) is answered for public repositories only, and recorded
+ * nowhere.
  */
 export async function queryAckt(input, fetchImpl, token) {
     const url = buildAcktQueryUrl(input);
-    const response = await fetchImpl(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
+    const response = await fetchImpl(url, { headers: authHeaders(token) });
     if (!response.ok) {
         throw new Error(`ackt query failed: ${response.status} ${response.statusText}`);
     }
     return parseAcktResponse(await response.json());
+}
+export function buildAttestationsQueryUrl(input) {
+    const url = new URL("/api/v1/attestations", input.service);
+    url.searchParams.set("repo", input.repo);
+    url.searchParams.set("pr", String(input.pr));
+    return url.toString();
+}
+/**
+ * Deliberately the opposite policy to `parseAcktResponse`: skip anything
+ * malformed, never throw.
+ *
+ * `attested` is a security decision, so a response that can't be understood
+ * has to fail the run rather than read as "not attested". These records
+ * decide nothing — they only let the comment print a real timestamp and a
+ * real history instead of guessing. Losing a row costs a table entry;
+ * throwing would cost the whole run, over decoration.
+ */
+export function parseAttestationRecords(data) {
+    if (typeof data !== "object" || data === null)
+        return [];
+    const raw = data.records;
+    if (!Array.isArray(raw))
+        return [];
+    const rows = [];
+    for (const entry of raw) {
+        if (typeof entry !== "object" || entry === null)
+            continue;
+        const record = entry;
+        const { actor, head, verified_at: verifiedAt } = record;
+        if (typeof actor !== "string" || typeof head !== "string" || typeof verifiedAt !== "string")
+            continue;
+        rows.push({ actor, head, verifiedAt });
+    }
+    return rows;
+}
+/**
+ * The service returns these ordered `verified_at ASC`; that order is
+ * preserved, because "oldest first" is what makes the comment's collapsed
+ * history read as a history.
+ *
+ * Throws on a non-OK response like `queryAckt` does, but the call site treats
+ * a failure here as non-fatal — see index.ts. This request buys presentation
+ * only (a real recorded-at timestamp, a real prior-attestation list); nothing
+ * about the attestation *decision* depends on it, so it must never be able to
+ * turn a run red.
+ */
+export async function queryAttestations(input, fetchImpl, token) {
+    const response = await fetchImpl(buildAttestationsQueryUrl(input), { headers: authHeaders(token) });
+    if (!response.ok) {
+        throw new Error(`ackt attestation record query failed: ${response.status} ${response.statusText}`);
+    }
+    return parseAttestationRecords(await response.json());
 }
 export function buildAncestryPostUrl(service) {
     return new URL("/api/v1/ancestry", service).toString();

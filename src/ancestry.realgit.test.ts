@@ -48,6 +48,11 @@ function initRepo(cwd: string): void {
   git(cwd, ["init", "--quiet"]);
   git(cwd, ["config", "user.email", "test@example.invalid"]);
   git(cwd, ["config", "user.name", "ackt-test"]);
+  // These commits exist to have SHAs, not signatures. Without this the
+  // developer's global `commit.gpgsign true` applies, every `commit` below
+  // races a 1Password prompt, and this file fails intermittently for a reason
+  // that has nothing to do with what it tests.
+  git(cwd, ["config", "commit.gpgsign", "false"]);
 }
 
 let tmpRoot: string | undefined;
@@ -206,5 +211,63 @@ describe("computeAncestryVerdicts fetching its own current head against a real g
     expect(git(localDir, ["rev-parse", "--is-shallow-repository"])).toBe("false");
     // ...and must not have severed the unrelated, already-established A→E ancestry.
     expect(isAncestor(shaA, shaE)).toBe(true);
+  });
+});
+
+/**
+ * C1. Every test above starts from a *full* clone — which is exactly why the
+ * bug survived: the suite shared the code's assumption that the workspace is
+ * one, and that assumption is the consumer's to make, not ours.
+ *
+ * This one starts where `actions/checkout@v4` leaves an adopter who omitted
+ * `fetch-depth: 0`: a `--depth=1` clone. In that clone both endpoints still
+ * fetch cleanly by SHA (rc=0) but the history between them is absent, and
+ * `git merge-base --is-ancestor` exits **1** — the one code `isAncestor`
+ * reads as definitive. Before the guard, this test's `computeAncestryVerdicts`
+ * returned `rewritten`: the product telling a person the commit they signed
+ * for had been erased.
+ *
+ * Two things make this a real proof rather than a restatement of the code:
+ * it clones a `file://` URL (git silently *ignores* `--depth` for a plain
+ * local path, so a naive repro quietly builds a full clone and passes), and
+ * it asserts on `verdicts` rather than on the probe, so deleting
+ * `isShallowRepository` fails it.
+ */
+describe("computeAncestryVerdicts in a shallow clone — the checkout default", () => {
+  it("reports no verdict at all, rather than the confident false 'rewritten' git actually answers here", () => {
+    tmpRoot = (execFileSync("mktemp", ["-d"], { encoding: "utf8" }) as string).trim();
+    const remoteDir = `${tmpRoot}/remote`;
+    const localDir = `${tmpRoot}/local`;
+    execFileSync("mkdir", ["-p", remoteDir]);
+
+    initRepo(remoteDir);
+    const shaA = commit(remoteDir, "A"); // the attested head — four commits back
+    commit(remoteDir, "B");
+    commit(remoteDir, "C");
+    commit(remoteDir, "D");
+    const shaHead = commit(remoteDir, "E"); // the PR's current head
+
+    // Exactly what actions/checkout does by default. `file://` is load-bearing:
+    // with a plain path git ignores --depth and clones everything.
+    execFileSync("git", ["clone", "--quiet", "--depth=1", `file://${remoteDir}`, localDir]);
+
+    originalCwd = process.cwd();
+    process.chdir(localDir);
+
+    // The premise, established against real git rather than asserted: the
+    // clone is shallow, both endpoints fetch fine, and git's own answer to
+    // the ancestry question here is a definitive, wrong "no" (exit 1).
+    expect(git(localDir, ["rev-parse", "--is-shallow-repository"])).toBe("true");
+    expect(isAncestor(shaA, shaHead)).toBe(false); // ← the false 'rewritten', straight from git
+
+    // And this is the fix: no verdict for that head. The service records the
+    // absence as `unknown`, which is what the README and /docs have always
+    // claimed a missing `fetch-depth: 0` does.
+    // Asserted as `toBeUndefined` rather than `has(...) === false` so that
+    // removing the guard fails with the finding itself in the message:
+    // "expected 'rewritten' to be undefined".
+    const verdicts = computeAncestryVerdicts([shaA], shaHead);
+    expect(verdicts.get(shaA)).toBeUndefined();
+    expect(verdicts.size).toBe(0);
   });
 });

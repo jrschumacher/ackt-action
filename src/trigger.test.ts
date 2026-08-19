@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BOT_LOGIN, decideTrigger } from "./trigger.js";
+import { BOT_LOGIN, decideTrigger, isForkPullRequest } from "./trigger.js";
 
 function pullRequestEvent(action: string): unknown {
   return { action, pull_request: { number: 1 } };
@@ -213,5 +213,63 @@ describe("decideTrigger — other issue_comment actions and event types", () => 
   it("does not act on an unhandled event type", () => {
     const decision = decideTrigger("push", { ref: "refs/heads/main" });
     expect(decision.act).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// I4. GitHub issues no OIDC token on a fork-origin `pull_request`, whatever
+// the workflow's `permissions:` say — so this predicate decides whether an
+// absent minting endpoint is the consumer's bug or GitHub's policy.
+// ---------------------------------------------------------------------------
+
+/** `baseRepo: false` means the payload carries no readable base repository name at all. */
+function forkShapedEvent(headRepo: string | null, baseRepo: string | false = "acme/widgets"): unknown {
+  return {
+    action: "opened",
+    pull_request: {
+      number: 1,
+      head: { repo: headRepo === null ? null : { full_name: headRepo } },
+      base: baseRepo === false ? {} : { repo: { full_name: baseRepo } },
+    },
+  };
+}
+
+describe("isForkPullRequest", () => {
+  it("is true when the head repository differs from the base repository", () => {
+    expect(isForkPullRequest("pull_request", forkShapedEvent("contributor/widgets"))).toBe(true);
+  });
+
+  it("is false for a same-repository pull request — a missing token there really is a missing permission", () => {
+    expect(isForkPullRequest("pull_request", forkShapedEvent("acme/widgets"))).toBe(false);
+  });
+
+  // The base repository's own fork can open internal PRs; those are
+  // same-repository runs and do mint a token normally.
+  it("is false for a pull request internal to a fork", () => {
+    expect(isForkPullRequest("pull_request", forkShapedEvent("contributor/widgets", "contributor/widgets"))).toBe(false);
+  });
+
+  // `issue_comment` runs in the base repository's context with the base
+  // repository's permissions, and mints a token even when the PR came from a
+  // fork — so an absent endpoint there is a real misconfiguration.
+  it("is false for issue_comment, whatever the payload looks like", () => {
+    expect(isForkPullRequest("issue_comment", forkShapedEvent("contributor/widgets"))).toBe(false);
+  });
+
+  it("is false for an event carrying no pull_request at all", () => {
+    expect(isForkPullRequest("pull_request", { action: "opened" })).toBe(false);
+    expect(isForkPullRequest("pull_request", null)).toBe(false);
+  });
+
+  // A deleted head repository is certainly not the base repository, and the
+  // degraded path is the safe direction for something we cannot read.
+  it("treats a null head repository as a fork", () => {
+    expect(isForkPullRequest("pull_request", forkShapedEvent(null))).toBe(true);
+  });
+
+  // Without a base name there is nothing to compare against; fall back to the
+  // old, loud behaviour rather than silently degrading every run.
+  it("is false when the base repository name is unreadable", () => {
+    expect(isForkPullRequest("pull_request", forkShapedEvent("contributor/widgets", false))).toBe(false);
   });
 });
